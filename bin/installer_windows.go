@@ -42,6 +42,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/http_comms"
 	logging "www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -351,11 +352,15 @@ func loadClientConfig() (*config_proto.Config, error) {
 		WithWriteback().
 		LoadAndValidate()
 	if err != nil {
-		logger := logging.GetLogger(config_obj, &logging.ClientComponent)
-		logger.Info("Failed to load %v will try again soon.\n", *config_path)
+		// Config obj is not valid here, we can not actually
+		// log anything since we dont know where to send it so
+		// prelog instead.
+		logging.Prelog("Failed to load %v will try again soon.\n", *config_path)
 
 		return nil, err
 	}
+
+	executor.SetTempfile(config_obj)
 
 	// Make sure the config is ok.
 	err = crypto.VerifyConfig(config_obj)
@@ -520,8 +525,12 @@ func runOnce(result *VelociraptorService, elog debug.Log) {
 
 	// Wait for all services to properly start
 	// before we begin the comms.
-	executor.StartServices(config_obj, manager.ClientId, exe)
-
+	sm := services.NewServiceManager(ctx, config_obj)
+	defer sm.Close()
+	err = executor.StartServices(sm, manager.ClientId, exe)
+	if err != nil {
+		return
+	}
 	comm.Run(ctx)
 }
 
@@ -536,6 +545,7 @@ func NewVelociraptorService(name string) (*VelociraptorService, error) {
 	go func() {
 		for {
 			runOnce(result, elog)
+			time.Sleep(10 * time.Second)
 		}
 	}()
 

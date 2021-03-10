@@ -1,6 +1,10 @@
 package paths
 
-import "www.velocidex.com/golang/velociraptor/constants"
+import (
+	"fmt"
+
+	"www.velocidex.com/golang/velociraptor/constants"
+)
 
 type UserPathManager struct {
 	Name string
@@ -14,6 +18,10 @@ func (self UserPathManager) Directory() string {
 	return constants.USER_URN
 }
 
+func (self UserPathManager) ACL() string {
+	return fmt.Sprintf("/acl/%v.json", self.Name)
+}
+
 func (self UserPathManager) GUIOptions() string {
-	return constants.USER_URN + "/gui/" + self.Name
+	return constants.USER_URN + "/gui/" + self.Name + ".json"
 }

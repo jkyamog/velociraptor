@@ -50,7 +50,7 @@ type ShellPlugin struct{}
 
 func (self ShellPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -92,7 +92,12 @@ func (self ShellPlugin) Call(
 
 		// Kill subprocess when the scope is destroyed.
 		sub_ctx, cancel := context.WithCancel(ctx)
-		scope.AddDestructor(cancel)
+		err = scope.AddDestructor(cancel)
+		if err != nil {
+			cancel()
+			scope.Log("shell: %v", err)
+			return
+		}
 
 		command := exec.CommandContext(sub_ctx, arg.Argv[0], arg.Argv[1:]...)
 		stdout_pipe, err := command.StdoutPipe()
@@ -110,9 +115,14 @@ func (self ShellPlugin) Call(
 		err = command.Start()
 		if err != nil {
 			scope.Log("shell: %v", err)
-			output_chan <- &ShellResult{
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- &ShellResult{
 				ReturnCode: 1,
 				Stderr:     fmt.Sprintf("%v", err),
+			}:
 			}
 			return
 
@@ -197,13 +207,23 @@ func (self ShellPlugin) Call(
 
 			if arg.Sep != "" {
 				response.Stdout = line
-				output_chan <- response
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- response:
+				}
 			} else {
 				data := response.Stdout + line
 				for len(data) > length {
 					response.Stdout = data[:length]
-					output_chan <- &ShellResult{
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- &ShellResult{
 						Stdout: response.Stdout,
+					}:
 					}
 					data = data[length:]
 				}
@@ -216,13 +236,23 @@ func (self ShellPlugin) Call(
 
 			if arg.Sep != "" {
 				response.Stderr = line
-				output_chan <- response
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- response:
+				}
 			} else {
 				data := response.Stderr + line
 				for len(data) > length {
 					response.Stderr = data[:length]
-					output_chan <- &ShellResult{
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- &ShellResult{
 						Stderr: response.Stderr,
+					}:
 					}
 					data = data[length:]
 				}
@@ -253,13 +283,19 @@ func (self ShellPlugin) Call(
 			}
 		}
 		response.Complete = true
-		output_chan <- response
+
+		select {
+		case <-ctx.Done():
+			return
+
+		case output_chan <- response:
+		}
 	}()
 
 	return output_chan
 }
 
-func (self ShellPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ShellPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "execve",
 		Doc:     "Execute the commands given by argv.",

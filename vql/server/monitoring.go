@@ -21,14 +21,12 @@ package server
 
 import (
 	"context"
-	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/result_sets"
+	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -38,7 +36,7 @@ type MonitoringPlugin struct{}
 
 func (self MonitoringPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -58,13 +56,13 @@ func (self MonitoringPlugin) Call(
 			return
 		}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
 		}
 
-		path_manager := result_sets.NewArtifactPathManager(
+		path_manager := artifact_paths.NewArtifactPathManager(
 			config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
 
 		row_chan, err := file_store.GetTimeRange(ctx, config_obj,
@@ -75,31 +73,24 @@ func (self MonitoringPlugin) Call(
 		}
 
 		for row := range row_chan {
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- row:
+			}
 		}
 	}()
 
 	return output_chan
 }
 
-func (self MonitoringPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self MonitoringPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "monitoring",
 		Doc: "Extract monitoring log from a client. If client_id is not specified " +
 			"we watch the global journal which contains event logs from all clients.",
 		ArgType: type_map.AddType(scope, &MonitoringPluginArgs{}),
 	}
-}
-
-// Keep the state of each monitoring file.
-type state map[string]info
-
-type info struct {
-	// Last modification time of the monitoring file.
-	age time.Time
-
-	// Last read offset in the file (we tail the file for new items).
-	offset int64
 }
 
 type MonitoringPluginArgs struct {
@@ -112,7 +103,7 @@ type WatchMonitoringPlugin struct{}
 
 func (self WatchMonitoringPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -125,7 +116,12 @@ func (self WatchMonitoringPlugin) Call(
 			return
 		}
 
-		if services.GetJournal() == nil {
+		journal, _ := services.GetJournal()
+		if err != nil {
+			return
+		}
+
+		if journal == nil {
 			scope.Log("watch_monitoring: can only run on the server via the API")
 			return
 		}
@@ -137,13 +133,13 @@ func (self WatchMonitoringPlugin) Call(
 			return
 		}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
 		}
 
-		mode, err := result_sets.GetArtifactMode(config_obj, arg.Artifact)
+		mode, err := artifact_paths.GetArtifactMode(config_obj, arg.Artifact)
 		if err != nil {
 			scope.Log("Artifact %s not known", arg.Artifact)
 			return
@@ -159,19 +155,15 @@ func (self WatchMonitoringPlugin) Call(
 		}
 
 		// Ask the journal service to watch the event queue for us.
-		qm_chan, cancel := services.GetJournal().Watch(arg.Artifact)
+		qm_chan, cancel := journal.Watch(ctx, arg.Artifact)
 		defer cancel()
 
-		for {
+		for row := range qm_chan {
 			select {
 			case <-ctx.Done():
 				return
 
-			case row, ok := <-qm_chan:
-				if !ok {
-					return
-				}
-				output_chan <- row
+			case output_chan <- row:
 			}
 		}
 	}()
@@ -179,7 +171,7 @@ func (self WatchMonitoringPlugin) Call(
 	return output_chan
 }
 
-func (self WatchMonitoringPlugin) Info(scope *vfilter.Scope,
+func (self WatchMonitoringPlugin) Info(scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "watch_monitoring",

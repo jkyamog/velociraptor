@@ -53,7 +53,7 @@ type _SplunkPluginArgs struct {
 type _SplunkPlugin struct{}
 
 func (self _SplunkPlugin) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -109,7 +109,7 @@ func (self _SplunkPlugin) Call(ctx context.Context,
 // Copy rows from row_chan to a local buffer and push it up to splunk.
 func _upload_rows(
 	ctx context.Context,
-	scope *vfilter.Scope, output_chan chan vfilter.Row,
+	scope vfilter.Scope, output_chan chan vfilter.Row,
 	row_chan <-chan vfilter.Row,
 	wg *sync.WaitGroup,
 	arg *_SplunkPluginArgs) {
@@ -136,7 +136,7 @@ func _upload_rows(
 	next_send_time := time.After(wait_time)
 
 	// Flush any remaining rows
-	defer send_to_splunk(scope, output_chan, client, &buf, arg)
+	defer send_to_splunk(ctx, scope, output_chan, client, &buf, arg)
 
 	// Batch sending to splunk: Either
 	// when we get to chuncksize or wait
@@ -153,7 +153,7 @@ func _upload_rows(
 
 		case <-next_send_time:
 
-			send_to_splunk(scope, output_chan,
+			send_to_splunk(ctx, scope, output_chan,
 				client, &buf, arg)
 
 			next_send_time = time.After(wait_time)
@@ -161,7 +161,9 @@ func _upload_rows(
 	}
 }
 
-func send_to_splunk(scope *vfilter.Scope,
+func send_to_splunk(
+	ctx context.Context,
+	scope vfilter.Scope,
 	output_chan chan vfilter.Row,
 	client *splunk.Client, buf *[]vfilter.Row, arg *_SplunkPluginArgs) {
 
@@ -188,11 +190,19 @@ func send_to_splunk(scope *vfilter.Scope,
 	err := client.LogEvents(events)
 
 	if err != nil {
-		output_chan <- ordereddict.NewDict().
-			Set("Response", err)
+		select {
+		case <-ctx.Done():
+			return
+		case output_chan <- ordereddict.NewDict().
+			Set("Response", err):
+		}
 	} else {
-		output_chan <- ordereddict.NewDict().
-			Set("Response", len(_buf))
+		select {
+		case <-ctx.Done():
+			return
+		case output_chan <- ordereddict.NewDict().
+			Set("Response", len(_buf)):
+		}
 	}
 
 	// clear the slice
@@ -201,7 +211,7 @@ func send_to_splunk(scope *vfilter.Scope,
 }
 
 func (self _SplunkPlugin) Info(
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "splunk_upload",

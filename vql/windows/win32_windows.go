@@ -1,3 +1,5 @@
+// +build windows,amd64
+
 /*
    Velociraptor - Hunting Evil
    Copyright (C) 2019 Velocidex Innovations.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"text/template"
@@ -17,16 +18,19 @@ import (
 	"github.com/Masterminds/sprig"
 	"github.com/Velocidex/json"
 	"github.com/Velocidex/ordereddict"
+	"github.com/pkg/errors"
 
 	chroma_html "github.com/alecthomas/chroma/formatters/html"
 	"github.com/microcosm-cc/bluemonday"
 	blackfriday "github.com/russross/blackfriday/v2"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
-	"www.velocidex.com/golang/velociraptor/result_sets"
+	"www.velocidex.com/golang/velociraptor/file_store/api"
+	"www.velocidex.com/golang/velociraptor/file_store/result_sets"
+	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -41,6 +45,8 @@ import (
 // input to mess up the page but hopefully not to XSS.
 var (
 	bm_policy = NewBlueMondayPolicy()
+
+	whitespace_regexp = regexp.MustCompile(`^\s*$`)
 )
 
 type GuiTemplateEngine struct {
@@ -50,6 +56,8 @@ type GuiTemplateEngine struct {
 	log_writer   *logWriter
 	path_manager *NotebookCellPathManager
 	Data         map[string]*actions_proto.VQLResponse
+	Progress     utils.ProgressReporter
+	Start        time.Time
 }
 
 // Go templates can call functions which take args. The pipeline is
@@ -98,7 +106,6 @@ func (self *GuiTemplateEngine) Expand(values ...interface{}) interface{} {
 		}
 
 		for _, item := range t {
-			//path_manager := NewNotebookCellPathManager(item)
 			result_chan, err := file_store.GetTimeRange(
 				context.Background(), self.config_obj, item, 0, 0)
 			if err == nil {
@@ -119,6 +126,28 @@ func (self *GuiTemplateEngine) Expand(values ...interface{}) interface{} {
 	}
 
 	return results
+}
+
+func (self *GuiTemplateEngine) Import(artifact, name string) interface{} {
+	definition, pres := self.BaseTemplateEngine.Repository.Get(
+		self.config_obj, artifact)
+	if !pres {
+		self.Error("Unknown artifact %v", artifact)
+		return ""
+	}
+
+	for _, report := range definition.Reports {
+		if report.Name == name {
+			// We parse the template for new definitions,
+			// we dont actually care about the output.
+			_, err := self.tmpl.Parse(SanitizeGoTemplates(report.Template))
+			if err != nil {
+				self.Error("Template Erorr: %v", err)
+			}
+		}
+	}
+
+	return ""
 }
 
 func (self *GuiTemplateEngine) Table(values ...interface{}) interface{} {
@@ -265,12 +294,18 @@ func (self *GuiTemplateEngine) Timeline(values ...interface{}) string {
 }
 
 func (self *GuiTemplateEngine) Execute(report *artifacts_proto.Report) (string, error) {
+	if self.Scope == nil {
+		return "", errors.New("Scope not configured")
+	}
+
 	template_string := report.Template
 
 	// Hard limit for report generation can be specified in the
 	// definition.
 	if report.Timeout > 0 {
-		self.ctx, _ = context.WithTimeout(self.ctx, time.Second*time.Duration(report.Timeout))
+		ctx, cancel := context.WithTimeout(self.ctx, time.Second*time.Duration(report.Timeout))
+		defer cancel()
+		self.ctx = ctx
 	}
 
 	tmpl, err := self.tmpl.Parse(SanitizeGoTemplates(template_string))
@@ -347,38 +382,80 @@ func (self *GuiTemplateEngine) Query(queries ...string) interface{} {
 			return nil
 		}
 
+		// Specifically trap the empty string.
+		if whitespace_regexp.MatchString(query) {
+			self.Error("Please specify a query to run")
+			return nil
+		}
+
 		multi_vql, err := vfilter.MultiParse(query)
 		if err != nil {
 			self.Error("VQL Error: %v", err)
 			return nil
 		}
 
-		ctx, cancel := context.WithCancel(self.ctx)
-		defer cancel()
-
 		for _, vql := range multi_vql {
-			written := false
-
 			// Replace the previously calculated json file.
 			opts := vql_subsystem.EncOptsFromScope(self.Scope)
+
+			// Ignore LET queries but still run them.
+			if vql.Let != "" {
+				for range vql.Eval(self.ctx, self.Scope) {
+				}
+				continue
+			}
+
 			path_manager := self.path_manager.NewQueryStorage()
+			result = append(result, path_manager)
 
-			rs_writer, err := result_sets.NewResultSetWriter(
-				self.config_obj, path_manager, opts, true /* truncate */)
-			if err != nil {
-				self.Error("Error: %v\n", err)
-				return ""
-			}
-			defer rs_writer.Close()
+			func(vql *vfilter.VQL, path_manager api.PathManager) {
+				file_store_factory := file_store.GetFileStore(self.config_obj)
 
-			for row := range vql.Eval(ctx, self.Scope) {
-				rs_writer.Write(vfilter.RowToDict(ctx, self.Scope, row))
-				written = true
-			}
+				rs_writer, err := result_sets.NewResultSetWriter(
+					file_store_factory, path_manager, opts, true /* truncate */)
+				if err != nil {
+					self.Error("Error: %v\n", err)
+					return
+				}
+				defer rs_writer.Close()
 
-			if written {
-				result = append(result, path_manager)
-			}
+				rs_writer.Flush()
+
+				row_idx := 0
+				next_progress := time.Now().Add(4 * time.Second)
+				eval_chan := vql.Eval(self.ctx, self.Scope)
+
+				defer self.Progress.Report("Completed query")
+
+				for {
+					select {
+					case <-self.ctx.Done():
+						return
+
+					case row, ok := <-eval_chan:
+						if !ok {
+							return
+						}
+						row_idx++
+						rs_writer.Write(vfilter.RowToDict(self.ctx, self.Scope, row))
+
+						if self.Progress != nil && (row_idx%100 == 0 ||
+							time.Now().After(next_progress)) {
+							rs_writer.Flush()
+							self.Progress.Report(fmt.Sprintf(
+								"Total Rows %v", row_idx))
+							next_progress = time.Now().Add(4 * time.Second)
+						}
+
+						// Report progress even if no row is emitted
+					case <-time.After(4 * time.Second):
+						rs_writer.Flush()
+						self.Progress.Report(fmt.Sprintf(
+							"Total Rows %v", row_idx))
+						next_progress = time.Now().Add(4 * time.Second)
+					}
+				}
+			}(vql, path_manager)
 		}
 	}
 	return result
@@ -440,7 +517,12 @@ func (self *logWriter) Write(b []byte) (int, error) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	// Do not allow the log messages to accumulate too much.
 	self.messages = append(self.messages, string(b))
+	if len(self.messages) > 1000 {
+		self.messages = nil
+	}
+
 	return len(b), nil
 }
 
@@ -454,9 +536,9 @@ func (self *logWriter) Messages() []string {
 func NewGuiTemplateEngine(
 	config_obj *config_proto.Config,
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	acl_manager vql_subsystem.ACLManager,
-	repository *artifacts.Repository,
+	repository services.Repository,
 	notebook_cell_path_manager *NotebookCellPathManager,
 	artifact_name string) (
 	*GuiTemplateEngine, error) {
@@ -468,13 +550,14 @@ func NewGuiTemplateEngine(
 	}
 
 	log_writer := &logWriter{}
-	base_engine.Scope.Logger = log.New(log_writer, "", 0)
+	base_engine.Scope.SetLogger(log.New(log_writer, "", 0))
 	template_engine := &GuiTemplateEngine{
 		BaseTemplateEngine: base_engine,
 		ctx:                ctx,
 		log_writer:         log_writer,
 		path_manager:       notebook_cell_path_manager,
 		Data:               make(map[string]*actions_proto.VQLResponse),
+		Start:              time.Now(),
 	}
 	template_engine.tmpl = template.New("").Funcs(sprig.TxtFuncMap()).Funcs(
 		template.FuncMap{
@@ -485,6 +568,7 @@ func NewGuiTemplateEngine(
 			"Timeline":  template_engine.Timeline,
 			"Get":       template_engine.getFunction,
 			"Expand":    template_engine.Expand,
+			"import":    template_engine.Import,
 			"str":       strval,
 		})
 	return template_engine, nil
@@ -499,6 +583,7 @@ func NewBlueMondayPolicy() *bluemonday.Policy {
 	p.AllowAttrs("value", "params").OnElements("grr-csv-viewer")
 	p.AllowAttrs("value", "params").OnElements("grr-line-chart")
 	p.AllowAttrs("value", "params").OnElements("grr-timeline")
+	p.AllowAttrs("name").OnElements("grr-tool-viewer")
 
 	// Required for syntax highlighting.
 	p.AllowAttrs("class").OnElements("span")

@@ -65,7 +65,7 @@ func (self *WMIObject) Parse() (*ordereddict.Dict, error) {
 
 type eventQueryContext struct {
 	output chan vfilter.Row
-	scope  *vfilter.Scope
+	scope  vfilter.Scope
 }
 
 // This is called to handle the serialized event string. We just send
@@ -85,9 +85,11 @@ func (self *eventQueryContext) Log(message string) {
 
 //export process_event
 func process_event(ctx *C.int, bstring **C.ushort) {
-	go_ctx := pointer.Restore(unsafe.Pointer(ctx)).(*eventQueryContext)
-	text := ole.BstrToString(*(**uint16)(unsafe.Pointer(bstring)))
-	go_ctx.ProcessEvent(text)
+	go_ctx, ok := pointer.Restore(unsafe.Pointer(ctx)).(*eventQueryContext)
+	if ok {
+		text := ole.BstrToString(*(**uint16)(unsafe.Pointer(bstring)))
+		go_ctx.ProcessEvent(text)
+	}
 }
 
 //export log_error
@@ -108,7 +110,7 @@ type WmiEventPlugin struct{}
 
 func (self WmiEventPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &WmiEventPluginArgs{}
@@ -160,7 +162,7 @@ func (self WmiEventPlugin) Call(
 			return
 		}
 
-		for {
+		for item := range event_context.output {
 			select {
 			case <-sub_ctx.Done():
 				// Destroy the C context - we are done here.
@@ -170,11 +172,7 @@ func (self WmiEventPlugin) Call(
 				// Read the next item from the event
 				// queue and send it to the VQL
 				// subsystem.
-			case item, ok := <-event_context.output:
-				if !ok {
-					return
-				}
-				output_chan <- item
+			case output_chan <- item:
 			}
 		}
 	}()
@@ -182,7 +180,7 @@ func (self WmiEventPlugin) Call(
 	return output_chan
 }
 
-func (self WmiEventPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self WmiEventPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "wmi_events",
 		Doc:     "Executes an evented WMI queries asynchronously.",

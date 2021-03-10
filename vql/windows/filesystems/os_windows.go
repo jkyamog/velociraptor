@@ -29,6 +29,8 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/shirou/gopsutil/disk"
 	"www.velocidex.com/golang/velociraptor/glob"
 	"www.velocidex.com/golang/velociraptor/json"
@@ -37,12 +39,21 @@ import (
 	"www.velocidex.com/golang/vfilter"
 )
 
+var (
+	fileAccessorCurrentOpened = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "accessor_file_current_open",
+		Help: "Number of currently opened files with the file accessor.",
+	})
+)
+
 type OSFileInfo struct {
 	os.FileInfo
 
 	// Empty for files but may contain data for registry and
 	// resident NTFS.
 	_full_path string
+
+	follow_links bool
 }
 
 func (self *OSFileInfo) FullPath() string {
@@ -51,13 +62,23 @@ func (self *OSFileInfo) FullPath() string {
 
 func (self *OSFileInfo) Data() interface{} {
 	if self.IsLink() {
-		target, err := self.GetLink()
+		path := strings.TrimRight(
+			strings.TrimLeft(self.FullPath(), "\\"), "\\")
+		target, err := os.Readlink(path)
 		if err == nil {
 			return ordereddict.NewDict().
 				Set("Link", target)
 		}
 	}
 	return ordereddict.NewDict()
+}
+
+func (self *OSFileInfo) Btime() utils.TimeVal {
+	nsec := self.sys().CreationTime.Nanoseconds()
+	return utils.TimeVal{
+		Sec:  nsec / 1000000000,
+		Nsec: nsec,
+	}
 }
 
 func (self *OSFileInfo) Mtime() utils.TimeVal {
@@ -68,8 +89,10 @@ func (self *OSFileInfo) Mtime() utils.TimeVal {
 	}
 }
 
+// Windows does not provide the ctime (inode change time) using the
+// APIs.
 func (self *OSFileInfo) Ctime() utils.TimeVal {
-	nsec := self.sys().CreationTime.Nanoseconds()
+	nsec := self.sys().LastWriteTime.Nanoseconds()
 	return utils.TimeVal{
 		Sec:  nsec / 1000000000,
 		Nsec: nsec,
@@ -89,6 +112,10 @@ func (self *OSFileInfo) IsLink() bool {
 }
 
 func (self *OSFileInfo) GetLink() (string, error) {
+	if !self.follow_links {
+		return "", errors.New("Not following links")
+	}
+
 	path := strings.TrimRight(
 		strings.TrimLeft(self.FullPath(), "\\"), "\\")
 	target, err := os.Readlink(path)
@@ -138,7 +165,7 @@ type OSFileSystemAccessor struct {
 	follow_links bool
 }
 
-func (self OSFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+func (self OSFileSystemAccessor) New(scope vfilter.Scope) (glob.FileSystemAccessor, error) {
 	result := &OSFileSystemAccessor{follow_links: self.follow_links}
 	return result, nil
 }
@@ -227,25 +254,42 @@ func (self OSFileSystemAccessor) readDir(path string, depth int) ([]glob.FileInf
 	for _, f := range files {
 		result = append(result,
 			&OSFileInfo{
-				FileInfo:   f,
-				_full_path: dir_path + f.Name(),
+				follow_links: self.follow_links,
+				FileInfo:     f,
+				_full_path:   dir_path + f.Name(),
 			})
 	}
 	return result, nil
 }
 
+// Wrap the os.File object to keep track of open file handles.
+type OSFileWrapper struct {
+	*os.File
+}
+
+func (self OSFileWrapper) Close() error {
+	fileAccessorCurrentOpened.Dec()
+	return self.File.Close()
+}
+
 func (self OSFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error) {
 	path = GetPath(path)
 	file, err := os.Open(path)
-	return file, err
+	if err != nil {
+		return nil, err
+	}
+
+	fileAccessorCurrentOpened.Inc()
+	return OSFileWrapper{file}, nil
 }
 
 func (self *OSFileSystemAccessor) Lstat(path string) (glob.FileInfo, error) {
 
 	stat, err := os.Lstat(GetPath(path))
 	return &OSFileInfo{
-		FileInfo:   stat,
-		_full_path: path,
+		follow_links: self.follow_links,
+		FileInfo:     stat,
+		_full_path:   path,
 	}, err
 }
 

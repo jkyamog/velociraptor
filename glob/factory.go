@@ -56,7 +56,7 @@ type FileSystemAccessor interface {
 
 type NullFileSystemAccessor struct{}
 
-func (self NullFileSystemAccessor) New(scope *vfilter.Scope) FileSystemAccessor {
+func (self NullFileSystemAccessor) New(scope vfilter.Scope) FileSystemAccessor {
 	return self
 }
 
@@ -85,7 +85,7 @@ func (self NullFileSystemAccessor) PathJoin(root, stem string) string {
 	return filepath.Join(root, stem)
 }
 
-func GetAccessor(scheme string, scope *vfilter.Scope) (
+func GetAccessor(scheme string, scope vfilter.Scope) (
 	FileSystemAccessor, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -103,12 +103,12 @@ func GetAccessor(scheme string, scope *vfilter.Scope) (
 		return res, err
 	}
 
-	return nil, errors.New("Unknown filesystem accessor")
+	return nil, errors.New("Unknown filesystem accessor: " + scheme)
 }
 
 // A factory for new accessors
 type FileSystemAccessorFactory interface {
-	New(scope *vfilter.Scope) (FileSystemAccessor, error)
+	New(scope vfilter.Scope) (FileSystemAccessor, error)
 }
 
 func Register(scheme string, accessor FileSystemAccessorFactory) {

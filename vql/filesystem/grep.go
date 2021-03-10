@@ -20,12 +20,22 @@ package filesystem
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/Velocidex/ahocorasick"
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/glob"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+)
+
+var (
+	pool = sync.Pool{
+		New: func() interface{} {
+			buffer := make([]byte, 1024*1024) // 1Mb chunks
+			return &buffer
+		},
+	}
 )
 
 type GrepFunctionArgs struct {
@@ -39,7 +49,7 @@ type GrepFunction struct{}
 
 // The Grep VQL function searches for a literal or regex match inside the file
 func (self *GrepFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &GrepFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -61,7 +71,10 @@ func (self *GrepFunction) Call(ctx context.Context,
 	ah_matcher := ahocorasick.NewMatcher(keywords)
 	offset := 0
 
-	buf := make([]byte, 4*1024*1024) // 4Mb chunks
+	cached_buf := pool.Get().(*[]byte)
+	defer pool.Put(cached_buf)
+
+	buf := *cached_buf
 
 	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 	if err != nil {
@@ -125,7 +138,7 @@ func (self *GrepFunction) Call(ctx context.Context,
 	}
 }
 
-func (self GrepFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self GrepFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "grep",
 		Doc:     "Search a file for keywords.",

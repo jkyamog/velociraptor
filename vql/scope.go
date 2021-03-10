@@ -21,6 +21,9 @@ package vql
 import (
 	"sync"
 
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -34,7 +37,13 @@ type ScopeCache struct {
 	mu sync.Mutex
 }
 
-func CacheGet(scope *vfilter.Scope, key string) interface{} {
+func (self *ScopeCache) Set(key string, value interface{}) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	self.cache[key] = value
+}
+
+func CacheGet(scope vfilter.Scope, key string) interface{} {
 	any_obj, _ := scope.Resolve(CACHE_VAR)
 	cache, ok := any_obj.(*ScopeCache)
 	if ok {
@@ -46,7 +55,7 @@ func CacheGet(scope *vfilter.Scope, key string) interface{} {
 	return nil
 }
 
-func CacheSet(scope *vfilter.Scope, key string, value interface{}) {
+func CacheSet(scope vfilter.Scope, key string, value interface{}) {
 	any_obj, _ := scope.Resolve(CACHE_VAR)
 	cache, ok := any_obj.(*ScopeCache)
 	if ok {
@@ -55,6 +64,18 @@ func CacheSet(scope *vfilter.Scope, key string, value interface{}) {
 
 		cache.cache[key] = value
 	}
+}
+
+// The server config is sensitive and so it is *not* stored in the
+// scope vars and so can not be accessed by the VQL query
+// directly. VQL plugins can access it via this method.
+func GetServerConfig(scope vfilter.Scope) (*config_proto.Config, bool) {
+	config_any := CacheGet(scope, constants.SCOPE_SERVER_CONFIG)
+	if utils.IsNil(config_any) {
+		return nil, false
+	}
+	config, ok := config_any.(*config_proto.Config)
+	return config, ok
 }
 
 func NewScopeCache() *ScopeCache {

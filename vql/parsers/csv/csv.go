@@ -24,7 +24,6 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
 	"www.velocidex.com/golang/velociraptor/glob"
@@ -41,7 +40,7 @@ type ParseCSVPlugin struct{}
 
 func (self ParseCSVPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -99,7 +98,12 @@ func (self ParseCSVPlugin) Call(
 						row.Set(headers[idx], row_item)
 					}
 
-					output_chan <- row
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- row:
+					}
 				}
 			}()
 		}
@@ -108,7 +112,7 @@ func (self ParseCSVPlugin) Call(
 	return output_chan
 }
 
-func (self ParseCSVPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ParseCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "parse_csv",
 		Doc:     "Parses events from a CSV file.",
@@ -120,7 +124,7 @@ type _WatchCSVPlugin struct{}
 
 func (self _WatchCSVPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -151,13 +155,12 @@ func (self _WatchCSVPlugin) Call(
 		}
 
 		// Wait until the query is complete.
-		for {
+		for event := range event_channel {
 			select {
 			case <-ctx.Done():
 				return
 
-			case event := <-event_channel:
-				output_chan <- event
+			case output_chan <- event:
 			}
 		}
 	}()
@@ -165,7 +168,7 @@ func (self _WatchCSVPlugin) Call(
 	return output_chan
 }
 
-func (self _WatchCSVPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _WatchCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "watch_csv",
 		Doc: "Watch a CSV file and stream events from it. " +
@@ -184,7 +187,7 @@ type WriteCSVPlugin struct{}
 
 func (self WriteCSVPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -226,7 +229,7 @@ func (self WriteCSVPlugin) Call(
 				return
 			}
 
-			config_obj, ok := artifacts.GetServerConfig(scope)
+			config_obj, ok := vql_subsystem.GetServerConfig(scope)
 			if !ok {
 				scope.Log("Command can only run on the server")
 				return
@@ -241,7 +244,12 @@ func (self WriteCSVPlugin) Call(
 			}
 			defer file.Close()
 
-			file.Truncate()
+			err = file.Truncate()
+			if err != nil {
+				scope.Log("write_csv: Unable to truncate file %s: %v",
+					arg.Filename, err)
+				return
+			}
 
 			writer = csv.GetCSVAppender(scope, file, true)
 			defer writer.Close()
@@ -253,14 +261,19 @@ func (self WriteCSVPlugin) Call(
 
 		for row := range arg.Query.Eval(ctx, scope) {
 			writer.Write(row)
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- row:
+			}
 		}
 	}()
 
 	return output_chan
 }
 
-func (self WriteCSVPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self WriteCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "write_csv",
 		Doc:     "Write a query into a CSV file.",

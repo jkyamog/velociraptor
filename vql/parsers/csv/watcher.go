@@ -38,7 +38,7 @@ func (self *CSVWatcherService) Register(
 	filename string,
 	accessor string,
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	output_chan chan vfilter.Row) {
 
 	self.mu.Lock()
@@ -194,8 +194,6 @@ func (self *CSVWatcherService) monitorOnce(
 		self.registrations[key] = new_handles
 		handles = new_handles
 	}
-
-	return last_event, false
 }
 
 // A handle is given for each interested party. We write the event on
@@ -205,5 +203,5 @@ func (self *CSVWatcherService) monitorOnce(
 type Handle struct {
 	ctx         context.Context
 	output_chan chan vfilter.Row
-	scope       *vfilter.Scope
+	scope       vfilter.Scope
 }

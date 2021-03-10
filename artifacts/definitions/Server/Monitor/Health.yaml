@@ -3,6 +3,11 @@ description: |
   This is the main server health dashboard. It is shown on the
   homescreen and enabled by default on all new installs.
 
+  You may edit this artifact to customize your server dashboard.
+
+  Alternativly, edit the Welcome screen at the
+  `Server.Internal.Welcome` artifact.
+
 type: SERVER_EVENT
 
 sources:
@@ -43,26 +48,38 @@ reports:
 
       ## Server status
 
-      The following are total across all frontends.
-
-      <span class="container">
-        <span class="row">
-          <span class="col-sm panel">
-           CPU and Memory Utilization
-           {{ Query "CPU" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 }}
-          </span>
-          <span class="col-sm panel">
-           Currently Connected Clients
-           {{ Query "CurrentConnections" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 }}
-          </span>
-        </span>
+      <p>The following are total across all frontends.</p>
+          <span class="container">
+            <span class="row">
+              <span class="col-sm panel">
+               CPU and Memory Utilization
+               {{- Query "CPU" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 -}}
+              </span>
+              <span class="col-sm panel">
+               Currently Connected Clients
+               {{- Query "CurrentConnections" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 -}}
+              </span>
+            </span>
       </span>
 
 
       ## Users
 
-      {{ Query "SELECT Name, Permissions FROM gui_users()" | Table }}
+      {{ define "UserPermissions" }}
+        LET cleanup(permission) = to_dict(item={
+            SELECT * FROM foreach(row=items(item=permission), query={
+               SELECT _key, _value FROM scope()
+               WHERE _value AND NOT _key = "roles"
+            })
+        })
+
+        SELECT name, cleanup(permission=Permissions) AS Permissions,
+               join(array=Permissions.roles, sep=", ") AS Roles
+        FROM gui_users()
+      {{ end }}
+
+      {{ Query "UserPermissions" | Table }}
 
       ## Server version
 
-      {{ Query "SELECT Version FROM server_config" | Table }}
+      {{ Query "SELECT Version FROM config" | Table }}

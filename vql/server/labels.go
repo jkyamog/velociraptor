@@ -24,9 +24,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
-	"www.velocidex.com/golang/velociraptor/artifacts"
-	"www.velocidex.com/golang/velociraptor/clients"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -40,7 +38,7 @@ type AddLabelsArgs struct {
 type AddLabels struct{}
 
 func (self *AddLabels) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &AddLabelsArgs{}
@@ -56,27 +54,35 @@ func (self *AddLabels) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	config_obj, ok := artifacts.GetServerConfig(scope)
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
 	}
 
-	request := &api_proto.LabelClientsRequest{
-		Labels:    arg.Labels,
-		ClientIds: []string{arg.ClientId},
-		Operation: arg.Op,
-	}
-	err = clients.LabelClients(config_obj, request)
-	if err != nil {
-		scope.Log("label: %s", err.Error())
-		return vfilter.Null{}
-	}
+	labeler := services.GetLabeler()
+	for _, label := range arg.Labels {
+		switch arg.Op {
+		case "set":
+			err = labeler.SetClientLabel(config_obj, arg.ClientId, label)
 
+		case "remove":
+			err = labeler.RemoveClientLabel(config_obj, arg.ClientId, label)
+
+		case "check":
+			if !labeler.IsLabelSet(config_obj, arg.ClientId, label) {
+				return false
+			}
+		}
+		if err != nil {
+			scope.Log("label: %s", err.Error())
+			return vfilter.Null{}
+		}
+	}
 	return arg
 }
 
-func (self AddLabels) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self AddLabels) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name: "label",
 		Doc: "Add the labels to the client. " +

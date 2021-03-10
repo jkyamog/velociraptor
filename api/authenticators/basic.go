@@ -9,6 +9,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/users"
@@ -19,17 +20,20 @@ type BasicAuthenticator struct{}
 
 // Basic auth does not need any special handlers.
 func (self *BasicAuthenticator) AddHandlers(config_obj *config_proto.Config, mux *http.ServeMux) error {
-	mux.Handle("/logoff", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	base := config_obj.GUI.BasePath
+	mux.Handle(base+"/logoff", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		username, _, ok := r.BasicAuth()
 		if !ok {
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "authorization failed", http.StatusUnauthorized)
 			return
 		}
 
+		// The previous username is given as a query parameter.
 		params := r.URL.Query()
 		old_username, ok := params["username"]
 		if ok && len(old_username) == 1 && old_username[0] != username {
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, base, http.StatusTemporaryRedirect)
 			return
 		}
 
@@ -95,7 +99,7 @@ func (self *BasicAuthenticator) AuthenticateUserHandler(
 			return
 		}
 
-		// Checking is successfull - user authorized. Here we
+		// Checking is successful - user authorized. Here we
 		// build a token to pass to the underlying GRPC
 		// service with metadata about the user.
 		user_info := &api_proto.VelociraptorUser{
@@ -106,7 +110,7 @@ func (self *BasicAuthenticator) AuthenticateUserHandler(
 		// binary data in metadata.
 		serialized, _ := json.Marshal(user_info)
 		ctx := context.WithValue(
-			r.Context(), "USER", string(serialized))
+			r.Context(), constants.GRPC_USER_CONTEXT, string(serialized))
 
 		// Need to call logging after auth so it can access
 		// the USER value in the context.

@@ -103,13 +103,26 @@ func (self *FileBasedRingBuffer) Enqueue(item []byte) {
 	defer self.mu.Unlock()
 
 	binary.LittleEndian.PutUint64(self.write_buf, uint64(len(item)))
-	self.fd.WriteAt(self.write_buf, int64(self.header.WritePointer))
-	n, _ := self.fd.WriteAt(item, int64(self.header.WritePointer+8))
+	_, err := self.fd.WriteAt(self.write_buf, int64(self.header.WritePointer))
+	if err != nil {
+		self.Reset()
+		return
+	}
+	n, err := self.fd.WriteAt(item, int64(self.header.WritePointer+8))
+	if err != nil {
+		self.Reset()
+		return
+	}
+
 	self.header.WritePointer += 8 + int64(n)
 	self.header.AvailableBytes += int64(n)
 
 	serialized, _ := self.header.MarshalBinary()
-	self.fd.WriteAt(serialized, 0)
+	_, err = self.fd.WriteAt(serialized, 0)
+	if err != nil {
+		self.Reset()
+		return
+	}
 
 	logger := logging.GetLogger(self.config_obj, &logging.ClientComponent)
 	logger.WithFields(logrus.Fields{
@@ -150,7 +163,13 @@ func LeaseAndCompress(self IRingBuffer, size uint64) [][]byte {
 			break
 		}
 
-		compressed_message_list := utils.Compress(next_message_list)
+		compressed_message_list, err := utils.Compress(next_message_list)
+		if err != nil || len(compressed_message_list) == 0 {
+			// Something terrible happened! The file is
+			// corrupted and it is better to start again.
+			self.Reset()
+			break
+		}
 		result = append(result, compressed_message_list)
 		total_len += uint64(len(compressed_message_list))
 	}
@@ -166,7 +185,20 @@ func (self *FileBasedRingBuffer) IsItemBlackListed(item []byte) bool {
 	if err != nil || len(message_list.Job) == 0 {
 		return false
 	}
-	return executor.Canceller.IsCancelled(message_list.Job[0].SessionId)
+
+	message := message_list.Job[0]
+
+	// Always allow log messages through - even after a flow has
+	// been cancelled. This allows us to register the cancellation
+	// message in the flow logs.
+	if message.LogMessage != nil {
+		return false
+	}
+
+	if executor.Canceller != nil {
+		return executor.Canceller.IsCancelled(message.SessionId)
+	}
+	return false
 }
 
 func (self *FileBasedRingBuffer) Lease(size uint64) []byte {
@@ -219,7 +251,7 @@ func (self *FileBasedRingBuffer) Lease(size uint64) []byte {
 // _Truncate returns the file to a virgin state. Assumes
 // FileBasedRingBuffer is already under lock.
 func (self *FileBasedRingBuffer) _Truncate() {
-	self.fd.Truncate(0)
+	_ = self.fd.Truncate(0)
 	self.header.ReadPointer = FirstRecordOffset
 	self.header.WritePointer = FirstRecordOffset
 	self.header.AvailableBytes = 0
@@ -227,7 +259,7 @@ func (self *FileBasedRingBuffer) _Truncate() {
 
 	self.leased_pointer = FirstRecordOffset
 	serialized, _ := self.header.MarshalBinary()
-	self.fd.WriteAt(serialized, 0)
+	_, _ = self.fd.WriteAt(serialized, 0)
 	self.c.Broadcast()
 }
 
@@ -258,7 +290,7 @@ func (self *FileBasedRingBuffer) Commit() {
 	self.header.LeasedBytes = 0
 
 	serialized, _ := self.header.MarshalBinary()
-	self.fd.WriteAt(serialized, 0)
+	_, _ = self.fd.WriteAt(serialized, 0)
 
 	logger.WithFields(logrus.Fields{
 		"header": self.header,
@@ -268,6 +300,10 @@ func (self *FileBasedRingBuffer) Commit() {
 func NewFileBasedRingBuffer(
 	config_obj *config_proto.Config,
 	log_ctx *logging.LogContext) (*FileBasedRingBuffer, error) {
+
+	if config_obj.Client == nil || config_obj.Client.LocalBuffer == nil {
+		return nil, errors.New("Local buffer not configured")
+	}
 
 	filename := getLocalBufferName(config_obj)
 	if filename == "" {
@@ -405,10 +441,35 @@ func (self *RingBuffer) AvailableBytes() uint64 {
 	return self.total_length
 }
 
+// Determine if the item is blacklisted. Items are blacklisted when
+// their corresponding flow is cancelled.
+func (self *RingBuffer) IsItemBlackListed(item []byte) bool {
+	message_list := crypto_proto.MessageList{}
+	err := proto.Unmarshal(item, &message_list)
+	if err != nil || len(message_list.Job) == 0 {
+		return false
+	}
+
+	message := message_list.Job[0]
+
+	// Always allow log messages through - even after a flow has
+	// been cancelled. This allows us to register the cancellation
+	// message in the flow logs.
+	if message.LogMessage != nil {
+		return false
+	}
+
+	if executor.Canceller != nil {
+		return executor.Canceller.IsCancelled(message.SessionId)
+	}
+	return false
+}
+
 // Leases a group of messages for transmission. Will not advance the
 // read pointer until we know those have been successfully delivered
 // via Commit(). This allows us to crash during transmission and we
 // will just re-send the messages when we restart.
+// NOTE: This is not used right now - the buffer is reset on startup.
 func (self *RingBuffer) Lease(size uint64) []byte {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -421,13 +482,21 @@ func (self *RingBuffer) Lease(size uint64) []byte {
 	leased := make([]byte, 0)
 
 	for _, item := range self.messages[self.leased_idx:] {
-		leased = append(leased, item...)
+		if !self.IsItemBlackListed(item) {
+			leased = append(leased, item...)
+		}
 		self.leased_length += uint64(len(item))
 		self.leased_idx += 1
-		if self.leased_length > size {
+		if uint64(len(leased)) > size {
 			break
 		}
 	}
+
+	logger := logging.GetLogger(self.config_obj, &logging.ClientComponent)
+	logger.WithFields(logrus.Fields{
+		"total_length":  len(leased),
+		"leased_length": self.leased_length,
+	}).Info("Ring Buffer: Leased")
 
 	return leased
 }

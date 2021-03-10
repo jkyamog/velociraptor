@@ -98,6 +98,12 @@ service API {
         };
     }
 
+    rpc GetHuntFlows(GetTableRequest) returns (GetTableResponse) {
+        option (google.api.http) = {
+            get: "/api/v1/GetHuntFlows",
+        };
+    }
+
     rpc GetHuntResults(GetHuntResultsRequest) returns (GetTableResponse) {
         option (google.api.http) = {
             get: "/api/v1/GetHuntResults",
@@ -128,6 +134,19 @@ service API {
     rpc GetClient(GetClientRequest) returns (ApiClient) {
         option (google.api.http) = {
             get: "/api/v1/GetClient/{client_id}",
+        };
+    }
+
+    rpc GetClientMetadata(GetClientRequest) returns (ClientMetadata) {
+        option (google.api.http) = {
+            get: "/api/v1/GetClientMetadata/{client_id}",
+        };
+    }
+
+    rpc SetClientMetadata(ClientMetadata) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/SetClientMetadata",
+            body: "*"
         };
     }
 
@@ -277,6 +296,20 @@ service API {
         };
     }
 
+    // Tools
+    rpc GetToolInfo(Tool) returns (Tool) {
+        option (google.api.http) = {
+            get: "/api/v1/GetToolInfo",
+        };
+    }
+
+    rpc SetToolInfo(Tool) returns (Tool) {
+        option (google.api.http) = {
+            post: "/api/v1/SetToolInfo",
+            body: "*",
+        };
+    }
+
     // Reporting and post processing.
     rpc GetReport(GetReportRequest) returns (GetReportResponse) {
         option (google.api.http) = {
@@ -304,7 +337,7 @@ service API {
 
     // Client Monitoring Artifacts - manage the Client Monitoring
     // Service.
-    rpc GetClientMonitoringState(google.protobuf.Empty) returns (ArtifactCollectorArgs) {
+    rpc GetClientMonitoringState(google.protobuf.Empty) returns (ClientEventTable) {
         option (google.api.http) = {
             get: "/api/v1/GetClientMonitoringState",
         };
@@ -312,7 +345,7 @@ service API {
 
     // Client Monitoring Artifacts - manage the Client Monitoring
     // Service.
-    rpc SetClientMonitoringState(ArtifactCollectorArgs) returns (ArtifactCollectorArgs) {
+    rpc SetClientMonitoringState(ClientEventTable) returns (google.protobuf.Empty) {
         option (google.api.http) = {
             post: "/api/v1/SetClientMonitoringState",
             body: "*",
@@ -342,7 +375,7 @@ service API {
         };
     }
 
-   rpc NewNotebook(NotebookMetadata) returns (google.protobuf.Empty) {
+   rpc NewNotebook(NotebookMetadata) returns (NotebookMetadata) {
         option (google.api.http) = {
             post: "/api/v1/NewNotebook",
             body: "*",

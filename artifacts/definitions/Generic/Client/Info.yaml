@@ -19,7 +19,14 @@ sources:
                config.Version.BuildTime as BuildTime,
                config.Labels AS Labels,
                Hostname, OS, Architecture,
-               Platform, PlatformVersion, KernelVersion, Fqdn
+               Platform, PlatformVersion, KernelVersion, Fqdn,
+               {
+                  SELECT * FROM if(
+                     condition=version(plugin='wmi') != NULL,
+                     then={
+                         SELECT Domain FROM wmi(query='SELECT Domain FROM win32_computersystem')
+                     })
+               } AS ADDomain
         FROM info()
 
   - name: Users
@@ -52,8 +59,17 @@ reports:
            WHERE CPUPercent >= 0
       {{ end }}
 
+      <div>
       {{ Query "resources" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 }}
+      </div>
 
       # Active Users
 
       {{ Query "SELECT * FROM source(source='Users')" | Table }}
+
+
+column_types:
+  - name: BuildTime
+    type: timestamp
+  - name: LastLogin
+    type: timestamp

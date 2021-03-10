@@ -36,9 +36,9 @@ import (
 
 var (
 	assets = map[string]string{
-		"artifacts/b0x.yaml": "artifacts/assets/ab0x.go",
-		"config/b0x.yaml":    "config/ab0x.go",
-		"gui/b0x.yaml":       "gui/assets/ab0x.go",
+		"artifacts/b0x.yaml":        "artifacts/assets/ab0x.go",
+		"config/b0x.yaml":           "config/ab0x.go",
+		"gui/velociraptor/b0x.yaml": "gui/velociraptor/ab0x.go",
 	}
 
 	// apt-get install gcc-mingw-w64-x86-64
@@ -93,11 +93,17 @@ func (self *Builder) Env() map[string]string {
 	}
 
 	// If we are cross compiling, set the right compiler.
-	if runtime.GOOS == "linux" && self.goos == "windows" {
+	if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") &&
+		self.goos == "windows" {
+
 		if self.arch == "amd64" {
-			env["CC"] = mingw_xcompiler
+			if mingwxcompiler_exists() {
+				env["CC"] = mingw_xcompiler
+			}
 		} else {
-			env["CC"] = mingw_xcompiler_32
+			if mingwxcompiler32_exists() {
+				env["CC"] = mingw_xcompiler_32
+			}
 		}
 	}
 
@@ -254,13 +260,18 @@ func WindowsDev() error {
 		arch:       "amd64"}.Run()
 }
 
+// Windows binary with race detection. This requires building on
+// windows (ie not cross compiling). You will need to install gcc
+// first using https://jmeubank.github.io/tdm-gcc/ as well as the Go
+// windows distribution and optionally the windows node distribution
+// (for the GUI).
 func WindowsTest() error {
 	return Builder{
 		goos:        "windows",
-		disable_cgo: false,
 		extra_tags:  " release yara ",
 		filename:    "velociraptor.exe",
-		arch:        "amd64"}.Run()
+		arch:        "amd64",
+		extra_flags: []string{"-race"}}.Run()
 }
 
 func Windowsx86() error {
@@ -331,7 +342,7 @@ func build_gui_files() error {
 	}
 	defer os.Chdir(cwd)
 
-	err = os.Chdir("gui/static")
+	err = os.Chdir("gui/velociraptor")
 	if err != nil {
 		return err
 	}
@@ -341,7 +352,7 @@ func build_gui_files() error {
 		return err
 	}
 
-	return sh.RunV("node", "node_modules/gulp/bin/gulp.js", "compile")
+	return sh.RunV("npm", "run", "build")
 }
 
 func flags() string {
@@ -390,6 +401,11 @@ func ensure_assets() error {
 
 func mingwxcompiler_exists() bool {
 	err := sh.Run(mingw_xcompiler, "--version")
+	return err == nil
+}
+
+func mingwxcompiler32_exists() bool {
+	err := sh.Run(mingw_xcompiler_32, "--version")
 	return err == nil
 }
 

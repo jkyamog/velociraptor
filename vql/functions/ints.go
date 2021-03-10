@@ -20,6 +20,7 @@ package functions
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -33,7 +34,7 @@ type IntArgs struct {
 type IntFunction struct{}
 
 func (self *IntFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &IntArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -43,22 +44,31 @@ func (self *IntFunction) Call(ctx context.Context,
 	}
 
 	switch t := arg.Int.(type) {
+	case string:
+		result, _ := strconv.ParseInt(t, 0, 64)
+		return result
+
 	case float64:
 		return int64(t)
+
 	case int:
 		return int64(t)
+
 	case int64:
 		return int64(t)
+
 	case uint64:
 		return int64(t)
+
 	case uint32:
 		return uint64(t)
+
 	}
 
 	return 0
 }
 
-func (self IntFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self IntFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "int",
 		Doc:     "Truncate to an integer.",
@@ -73,7 +83,7 @@ type StrFunctionArgs struct {
 type StrFunction struct{}
 
 func (self *StrFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &StrFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -94,7 +104,7 @@ func (self *StrFunction) Call(ctx context.Context,
 	}
 }
 
-func (self StrFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self StrFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "str",
 		Doc:     "Normalize a String.",

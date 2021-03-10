@@ -39,7 +39,7 @@ type _PrefetchPlugin struct{}
 
 func (self _PrefetchPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -90,7 +90,12 @@ func (self _PrefetchPlugin) Call(
 					return
 				}
 
-				output_chan <- prefetch_info
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- prefetch_info:
+				}
 			}()
 		}
 	}()
@@ -98,7 +103,7 @@ func (self _PrefetchPlugin) Call(
 	return output_chan
 }
 
-func (self _PrefetchPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _PrefetchPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "prefetch",
 		Doc:     "Parses a prefetch file.",

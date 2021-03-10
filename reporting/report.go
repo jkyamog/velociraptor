@@ -6,10 +6,10 @@ import (
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -27,7 +27,8 @@ type TemplateEngine interface {
 type BaseTemplateEngine struct {
 	Artifact   *artifacts_proto.Artifact
 	Env        *ordereddict.Dict
-	Scope      *vfilter.Scope
+	Repository services.Repository
+	Scope      vfilter.Scope
 	logger     *logging.LogContext
 	config_obj *config_proto.Config
 }
@@ -44,13 +45,20 @@ func (self *BaseTemplateEngine) Close() {
 	self.Scope.Close()
 }
 
-func (self *BaseTemplateEngine) getFunction(a interface{}, b string) interface{} {
+func (self *BaseTemplateEngine) getFunction(a interface{}, b string,
+	opts ...interface{}) interface{} {
+
 	res := a
 	var pres bool
 	for _, component := range strings.Split(b, ".") {
 		res, pres = self.Scope.Associative(res, component)
 		if !pres {
-			return ""
+			var defaultValue interface{} = ""
+			if len(opts) > 0 {
+				defaultValue = opts[0]
+			}
+
+			return defaultValue
 		}
 	}
 	return res
@@ -147,12 +155,18 @@ func GenerateArtifactDescriptionReport(
 	string, error) {
 	artifact := template_engine.GetArtifact()
 
-	repository, err := artifacts.GetGlobalRepository(config_obj)
+	manager, err := services.GetRepositoryManager()
 	if err != nil {
 		return "", err
 	}
 
-	template_artifact, pres := repository.Get("Server.Internal.ArtifactDescription")
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return "", err
+	}
+
+	template_artifact, pres := repository.Get(
+		config_obj, "Server.Internal.ArtifactDescription")
 	if pres {
 		template_engine.SetEnv("artifact", artifact)
 		for _, report := range getArtifactReports(
@@ -304,13 +318,13 @@ func GenerateHuntReport(template_engine TemplateEngine,
 
 func newBaseTemplateEngine(
 	config_obj *config_proto.Config,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	acl_manager vql_subsystem.ACLManager,
-	repository *artifacts.Repository,
+	repository services.Repository,
 	artifact_name string) (
 	*BaseTemplateEngine, error) {
 
-	artifact, pres := repository.Get(artifact_name)
+	artifact, pres := repository.Get(config_obj, artifact_name)
 	if !pres {
 		return nil, fmt.Errorf(
 			"Artifact %v not known.", artifact_name)
@@ -321,10 +335,16 @@ func newBaseTemplateEngine(
 	// SetEnv() can update it later.
 	env := ordereddict.NewDict()
 	if scope == nil {
-		scope = artifacts.ScopeBuilder{
-			Config:     config_obj,
-			ACLManager: acl_manager,
-		}.Build()
+		manager, err := services.GetRepositoryManager()
+		if err != nil {
+			return nil, err
+		}
+
+		scope = manager.BuildScope(
+			services.ScopeBuilder{
+				Config:     config_obj,
+				ACLManager: acl_manager,
+			})
 	}
 	scope.AppendVars(env)
 
@@ -332,6 +352,7 @@ func newBaseTemplateEngine(
 
 	return &BaseTemplateEngine{
 		Artifact:   artifact,
+		Repository: repository,
 		Scope:      scope,
 		Env:        env,
 		logger:     logging.GetLogger(config_obj, &logging.FrontendComponent),

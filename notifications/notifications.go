@@ -1,17 +1,23 @@
 package notifications
 
 import (
+	"regexp"
 	"sync"
+	"time"
+
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 )
 
 type NotificationPool struct {
 	mu      sync.Mutex
 	clients map[string]chan bool
+	done    chan bool
 }
 
 func NewNotificationPool() *NotificationPool {
 	return &NotificationPool{
 		clients: make(map[string]chan bool),
+		done:    make(chan bool),
 	}
 }
 
@@ -67,9 +73,50 @@ func (self *NotificationPool) Notify(client_id string) {
 	}
 }
 
+func (self *NotificationPool) NotifyByRegex(
+	config_obj *config_proto.Config, re *regexp.Regexp) {
+
+	// First take a snapshot of the current clients connected.
+	self.mu.Lock()
+	snapshot := make([]string, 0, len(self.clients))
+	for key, _ := range self.clients {
+		if re.MatchString(key) {
+			snapshot = append(snapshot, key)
+		}
+	}
+	self.mu.Unlock()
+
+	// Now notify all these clients in the background if
+	// possible. Take it slow so as not to overwhelm the server.
+	rate := config_obj.Frontend.Resources.NotificationsPerSecond
+	if rate == 0 || rate > 1000 {
+		rate = 1000
+	}
+	sleep_time := time.Duration(1000/rate) * time.Millisecond
+	go func() {
+		for _, client_id := range snapshot {
+			self.mu.Lock()
+			c, pres := self.clients[client_id]
+			if pres {
+				close(c)
+				delete(self.clients, client_id)
+			}
+			self.mu.Unlock()
+
+			select {
+			case <-self.done:
+				return
+			case <-time.After(sleep_time):
+			}
+		}
+	}()
+}
+
 func (self *NotificationPool) Shutdown() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
+
+	close(self.done)
 
 	// Send all the readers the quit signal and shut down the
 	// pool.
@@ -80,13 +127,6 @@ func (self *NotificationPool) Shutdown() {
 	self.clients = make(map[string]chan bool)
 }
 
-func (self *NotificationPool) NotifyAll() {
-	self.mu.Lock()
-	defer self.mu.Unlock()
-
-	for _, c := range self.clients {
-		close(c)
-	}
-
-	self.clients = make(map[string]chan bool)
+func (self *NotificationPool) NotifyAll(config_obj *config_proto.Config) {
+	self.NotifyByRegex(config_obj, regexp.MustCompile("."))
 }

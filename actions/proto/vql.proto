@@ -30,6 +30,12 @@ message VQLCollectorArgs {
     option (flow_metadata) = {
         category: "Generic";
     };
+
+    // The principal that created this request - only sent when
+    // scheduling the server so the server may keep track on who ran
+    // each query.
+    string principal = 28;
+
     repeated VQLEnv env = 3 [(sem_type) = {
             description: "Environment variables to be provided for the query.",
         }];
@@ -63,6 +69,9 @@ message VQLCollectorArgs {
             description: "Maximum time for the query to run."
         }];
 
+    // How often to heart beat progress (default 30 sec)
+    uint64 heartbeat = 27;
+
     repeated string tools = 26 [(sem_type)={
             description: "A list of tools we will need to run this VQL.",
         }];
@@ -74,9 +83,16 @@ message VQLTypeMap {
 }
 
 message VQLResponse {
+    // Response is encoded in a json array of rows.
     string Response = 1 [(sem_type) = {
             description: "JSON encoded response.",
         }];
+
+    // Response is encoded as line delimited JSON.
+    string JSONLResponse = 10 [(sem_type) = {
+            description: "JSON encoded response.",
+        }];
+
     repeated string Columns = 2 [(sem_type) = {
             description: "A list of column headings produced by the query.",
         }];

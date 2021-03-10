@@ -43,6 +43,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 type _FIFOCacheEntry struct {
@@ -59,7 +60,7 @@ type _FIFOCache struct {
 	max_rows int64
 }
 
-func (self *_FIFOCache) Snapshot() []vfilter.Row {
+func (self *_FIFOCache) Snapshot(flush bool) []vfilter.Row {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
@@ -68,6 +69,13 @@ func (self *_FIFOCache) Snapshot() []vfilter.Row {
 		entry := idx.Value.(*_FIFOCacheEntry)
 		result = append(result, entry.row)
 	}
+
+	// Flush the cache while we still have a lock on it.
+	if flush {
+		self.rows = list.New()
+		self.count = 0
+	}
+
 	return result
 }
 
@@ -107,7 +115,7 @@ func (self *_FIFOCache) Push(row vfilter.Row) {
 
 func NewFIFOCache(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	max_time time.Duration,
 	max_rows int64,
 	stored_query vfilter.StoredQuery) *_FIFOCache {
@@ -118,9 +126,13 @@ func NewFIFOCache(
 	}
 
 	done := make(chan bool)
-	scope.AddDestructor(func() {
+	err := vql_subsystem.GetRootScope(scope).AddDestructor(func() {
 		close(done)
 	})
+	if err != nil {
+		scope.Log("AddDestructor: %s", err)
+		close(done)
+	}
 
 	// Start the query and populate the _FIFOCache.
 	go func() {
@@ -152,15 +164,19 @@ type _FIFOPluginArgs struct {
 	Query   vfilter.StoredQuery `vfilter:"required,field=query,doc=Source for cached rows."`
 	MaxAge  int64               `vfilter:"optional,field=max_age,doc=Maximum number of seconds to hold rows in the fifo."`
 	MaxRows int64               `vfilter:"optional,field=max_rows,doc=Maximum number of rows to hold in the fifo."`
+	Flush   bool                `vfilter:"optional,field=flush,doc=If specified we flush all rows from cache after the call."`
 }
 
 type _FIFOPlugin struct{}
 
 func (self _FIFOPlugin) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
 	go func() {
 		defer close(output_chan)
 
@@ -184,7 +200,7 @@ func (self _FIFOPlugin) Call(ctx context.Context,
 		fifo_cache := vql_subsystem.CacheGet(scope, key)
 		if fifo_cache == nil {
 			scope.Log("Creating FIFO Cache for %v\n",
-				arg.Query.ToString(scope))
+				types.ToString(arg.Query, scope))
 			fifo_cache = NewFIFOCache(
 				ctx, scope,
 				time.Duration(arg.MaxAge)*time.Second,
@@ -193,16 +209,28 @@ func (self _FIFOPlugin) Call(ctx context.Context,
 			vql_subsystem.CacheSet(scope, key, fifo_cache)
 		}
 
-		snapshot := fifo_cache.(*_FIFOCache).Snapshot()
+		wg.Done()
+
+		snapshot := fifo_cache.(*_FIFOCache).Snapshot(arg.Flush)
 		for _, row := range snapshot {
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- row:
+			}
 		}
 	}()
+
+	// Wait until the fifo is created before returning to avoid
+	// races
+	wg.Wait()
+
 	return output_chan
 }
 
 func (self _FIFOPlugin) Info(
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "fifo",

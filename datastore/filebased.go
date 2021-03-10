@@ -37,7 +37,6 @@
 package datastore
 
 import (
-	"compress/gzip"
 	"io"
 	"io/ioutil"
 	"os"
@@ -177,12 +176,10 @@ func (self *FileBaseDataStore) Walk(config_obj *config_proto.Config,
 			}
 
 			// We are only interested in filenames that end with .db
-			basename := strings.TrimSuffix(info.Name(), ".gz")
+			basename := info.Name()
 			if !strings.HasSuffix(basename, ".db") {
 				return nil
 			}
-
-			path = strings.TrimSuffix(path, ".gz")
 
 			urn, err := FilenameToURN(config_obj, path)
 			if err != nil {
@@ -232,14 +229,6 @@ func (self *FileBaseDataStore) DeleteSubject(
 		return errors.WithStack(err)
 	}
 
-	filename += ".gz"
-	err = os.Remove(filename)
-
-	// It is ok to remove a file that does not exist.
-	if err != nil && os.IsExist(err) {
-		return errors.WithStack(err)
-	}
-
 	// Note: We do not currently remove empty intermediate
 	// directories.
 	return nil
@@ -252,7 +241,7 @@ func listChildren(config_obj *config_proto.Config,
 		return nil, err
 	}
 	dirname := strings.TrimSuffix(filename, ".db")
-	children, err := utils.ReadDir(dirname)
+	children, err := utils.ReadDirUnsorted(dirname)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []os.FileInfo{}, nil
@@ -267,16 +256,28 @@ func (self *FileBaseDataStore) ListChildren(
 	config_obj *config_proto.Config,
 	urn string,
 	offset uint64, length uint64) ([]string, error) {
-	result := []string{}
-
-	children, err := listChildren(config_obj, urn)
+	all_children, err := listChildren(config_obj, urn)
 	if err != nil {
-		return result, err
+		return nil, err
 	}
+
+	// In the same directory we may have files and directories -
+	// in here we only care about the files which have a .db
+	// extension so filter the directory listing.
+	children := make([]os.FileInfo, 0, len(all_children))
+	for _, child := range all_children {
+		if strings.HasSuffix(child.Name(), ".db") {
+			children = append(children, child)
+		}
+	}
+
+	// Sort entries by modified time.
 	sort.Slice(children, func(i, j int) bool {
-		return children[i].ModTime().Unix() > children[j].ModTime().Unix()
+		return children[i].ModTime().UnixNano() < children[j].ModTime().UnixNano()
 	})
 
+	// Slice the result according to the required offset and count.
+	result := make([]string, 0, len(children))
 	urn = strings.TrimSuffix(urn, "/")
 	for i := offset; i < offset+length; i++ {
 		if i >= uint64(len(children)) {
@@ -284,13 +285,10 @@ func (self *FileBaseDataStore) ListChildren(
 		}
 
 		name := UnsanitizeComponent(children[i].Name())
-		name = strings.TrimSuffix(name, ".gz")
-		if !strings.HasSuffix(name, ".db") {
-			continue
-		}
 		name = strings.TrimSuffix(name, ".db")
 		result = append(result, utils.PathJoin(urn, name, "/"))
 	}
+
 	return result, nil
 }
 
@@ -350,13 +348,28 @@ func (self *FileBaseDataStore) SearchClients(
 	config_obj *config_proto.Config,
 	index_urn string,
 	query string, query_type string,
-	offset uint64, limit uint64) []string {
+	offset uint64, limit uint64, sort_direction SortingSense) []string {
+
 	seen := make(map[string]bool)
-	result := []string{}
+
+	var result []string
+
+	if sort_direction == UNSORTED {
+		result = make([]string, 0, offset+limit)
+	}
 
 	query = strings.ToLower(query)
 	if query == "." || query == "" {
 		query = "all"
+	}
+
+	// If the result set is not sorted we can quit as soon as we
+	// have enough results. When sorting the results we are forced
+	// to enumerate all the clients, sort them and then chop them
+	// up into pages.
+	can_quit_early := func() bool {
+		return sort_direction == UNSORTED &&
+			uint64(len(result)) > offset+limit
 	}
 
 	add_func := func(key string) {
@@ -368,11 +381,14 @@ func (self *FileBaseDataStore) SearchClients(
 
 		for _, child_urn := range children {
 			name := UnsanitizeComponent(child_urn.Name())
-			name = strings.TrimSuffix(name, ".gz")
 			name = strings.TrimSuffix(name, ".db")
-			seen[name] = true
+			_, pres := seen[name]
+			if !pres {
+				seen[name] = true
+				result = append(result, name)
+			}
 
-			if uint64(len(seen)) > offset+limit {
+			if can_quit_early() {
 				break
 			}
 		}
@@ -386,9 +402,13 @@ func (self *FileBaseDataStore) SearchClients(
 		if err != nil {
 			return result
 		}
+
+		if sort_direction != UNSORTED {
+			result = make([]string, 0, len(sets))
+		}
+
 		for _, set := range sets {
 			name := UnsanitizeComponent(set.Name())
-			name = strings.TrimSuffix(name, ".gz")
 			name = strings.TrimSuffix(name, ".db")
 			matched, err := path.Match(query, name)
 			if err != nil {
@@ -397,13 +417,17 @@ func (self *FileBaseDataStore) SearchClients(
 			}
 			if matched {
 				if query_type == "key" {
-					seen[name] = true
+					_, pres := seen[name]
+					if !pres {
+						seen[name] = true
+						result = append(result, name)
+					}
 				} else {
 					add_func(name)
 				}
 			}
 
-			if uint64(len(seen)) > offset+limit {
+			if can_quit_early() {
 				break
 			}
 		}
@@ -411,14 +435,24 @@ func (self *FileBaseDataStore) SearchClients(
 		add_func(query)
 	}
 
-	for k := range seen {
-		result = append(result, k)
-	}
-
+	// No results within the range.
 	if uint64(len(result)) < offset {
 		return []string{}
 	}
 
+	// Sort the search results for stable pagination output.
+	switch sort_direction {
+	case SORT_DOWN:
+		sort.Slice(result, func(i, j int) bool {
+			return result[i] > result[j]
+		})
+	case SORT_UP:
+		sort.Slice(result, func(i, j int) bool {
+			return result[i] < result[j]
+		})
+	}
+
+	// Clamp the limit to the end of the results we have.
 	if uint64(len(result))-offset < limit {
 		limit = uint64(len(result)) - offset
 	}
@@ -510,7 +544,8 @@ func UnsanitizeComponent(component_str string) string {
 }
 
 func urnToFilename(config_obj *config_proto.Config, urn string) (string, error) {
-	if config_obj.Datastore.Location == "" {
+	if config_obj.Datastore == nil ||
+		config_obj.Datastore.Location == "" {
 		return "", errors.New("No Datastore_location is set in the config.")
 	}
 
@@ -547,8 +582,14 @@ func writeContentToFile(config_obj *config_proto.Config, urn string, data []byte
 
 	// Try to create intermediate directories and try again.
 	if err != nil && os.IsNotExist(err) {
-		os.MkdirAll(filepath.Dir(filename), 0700)
+		err = os.MkdirAll(filepath.Dir(filename), 0700)
+		if err != nil {
+			return err
+		}
 		file, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0660)
+		if err != nil {
+			return err
+		}
 	}
 	if err != nil {
 		logging.GetLogger(config_obj, &logging.FrontendComponent).Error(
@@ -557,7 +598,10 @@ func writeContentToFile(config_obj *config_proto.Config, urn string, data []byte
 	}
 	defer file.Close()
 
-	file.Truncate(0)
+	err = file.Truncate(0)
+	if err != nil {
+		return err
+	}
 
 	_, err = file.Write(data)
 	if err != nil {
@@ -583,20 +627,6 @@ func readContentFromFile(
 		return result, errors.WithStack(err)
 	}
 
-	// File does not exist - try the gzip version
-	if os.IsNotExist(err) {
-		file, err = os.Open(filename + ".gz")
-		if err == nil {
-			zr, err := gzip.NewReader(file)
-			if err != nil {
-				return nil, errors.WithStack(err)
-			}
-			result, err := ioutil.ReadAll(
-				io.LimitReader(zr, constants.MAX_MEMORY))
-			return result, errors.WithStack(err)
-		}
-	}
-
 	// Its ok if the file does not exist - no error.
 	if !must_exist && os.IsNotExist(err) {
 		return []byte{}, nil
@@ -617,7 +647,6 @@ func FilenameToURN(config_obj *config_proto.Config, filename string) (string, er
 	for _, component := range strings.Split(
 		filename,
 		string(os.PathSeparator)) {
-		component = strings.TrimSuffix(component, ".gz")
 		component = strings.TrimSuffix(component, ".db")
 		components = append(components,
 			string(UnsanitizeComponent(component)))

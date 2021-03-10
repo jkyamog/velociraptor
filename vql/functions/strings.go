@@ -28,13 +28,13 @@ import (
 
 type StripArgs struct {
 	String string `vfilter:"required,field=string,doc=The string to strip"`
-	Prefix string `vfilter:"required,field=prefix,doc=The prefix to strip"`
+	Prefix string `vfilter:"optional,field=prefix,doc=The prefix to strip"`
 }
 
 type StripFunction struct{}
 
 func (self *StripFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &StripArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -42,10 +42,13 @@ func (self *StripFunction) Call(ctx context.Context,
 		scope.Log("strip: %s", err.Error())
 		return false
 	}
+	if arg.Prefix == "" {
+		return strings.TrimSpace(arg.String)
+	}
 	return strings.TrimPrefix(arg.String, arg.Prefix)
 }
 
-func (self StripFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self StripFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "strip",
 		Doc:     "Strip a prefix from a string.",

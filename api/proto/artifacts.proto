@@ -2,6 +2,7 @@ syntax = "proto3";
 
 import "proto/semantic.proto";
 import "artifacts/proto/artifact.proto";
+import "flows/proto/artifact_collector.proto";
 
 package proto;
 
@@ -74,7 +75,7 @@ message LoadArtifactPackResponse {
 
 message APIResponse {
     bool error = 1 [(sem_type) = {
-            description: "An error occured setting the artifact.",
+            description: "An error occurred setting the artifact.",
         }];
 
     string error_message = 2;
@@ -137,9 +138,28 @@ message ListAvailableEventResultsRequest {
 
 message AvailableEvent {
     string artifact = 1;
+    Artifact definition = 3;
     repeated int32 timestamps = 2;
 }
 
 message ListAvailableEventResultsResponse {
     repeated AvailableEvent logs = 1;
+}
+
+message GetMonitoringStateRequest {
+    // Client monitoring states are controlled by labels.
+    string label = 1;
+}
+
+message GetMonitoringStateResponse {
+    // List all the labels matching the request
+    repeated SetMonitoringStateRequest requests = 1;
+}
+
+message SetMonitoringStateRequest {
+    // Sets the monitoring table for a subset of clients specified by
+    // label.
+    string label = 1;
+
+    ArtifactCollectorArgs request = 2;
 }

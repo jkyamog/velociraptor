@@ -21,6 +21,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -28,11 +30,11 @@ import (
 	"github.com/Velocidex/ordereddict"
 	humanize "github.com/dustin/go-humanize"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
-	artifacts "www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/responder"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -41,11 +43,12 @@ import (
 type LogWriter struct {
 	config_obj *config_proto.Config
 	responder  *responder.Responder
+	ctx        context.Context
 }
 
 func (self *LogWriter) Write(b []byte) (int, error) {
 	logging.GetLogger(self.config_obj, &logging.ClientComponent).Info("%v", string(b))
-	self.responder.Log("%s", string(b))
+	self.responder.Log(self.ctx, "%s", string(b))
 	return len(b), nil
 }
 
@@ -82,6 +85,11 @@ func (self VQLClientAction) StartQuery(
 		timeout = 600
 	}
 
+	heartbeat := arg.Heartbeat
+	if heartbeat == 0 {
+		heartbeat = 30
+	}
+
 	// Cancel the query after this deadline
 	deadline := time.After(time.Second * time.Duration(timeout))
 	started := time.Now().Unix()
@@ -89,17 +97,23 @@ func (self VQLClientAction) StartQuery(
 	defer cancel()
 
 	if arg.Query == nil {
-		responder.RaiseError("Query should be specified.")
+		responder.RaiseError(ctx, "Query should be specified.")
 		return
 	}
 
 	// Clients do not have a copy of artifacts so they need to be
 	// sent all artifacts from the server.
-	repository := artifacts.NewRepository()
+	manager, err := services.GetRepositoryManager()
+	if err != nil {
+		responder.RaiseError(ctx, fmt.Sprintf("%v", err))
+		return
+	}
+
+	repository := manager.NewRepository()
 	for _, artifact := range arg.Artifacts {
 		_, err := repository.LoadProto(artifact, false /* validate */)
 		if err != nil {
-			responder.RaiseError(fmt.Sprintf(
+			responder.RaiseError(ctx, fmt.Sprintf(
 				"Failed to compile artifact %v.", artifact.Name))
 			return
 		}
@@ -109,51 +123,66 @@ func (self VQLClientAction) StartQuery(
 		Responder: responder,
 	}
 
-	builder := artifacts.ScopeBuilder{
+	builder := services.ScopeBuilder{
 		Config: config_obj,
 		// Disable ACLs on the client.
 		ACLManager: vql_subsystem.NullACLManager{},
 		Env:        ordereddict.NewDict(),
 		Uploader:   uploader,
 		Repository: repository,
-		Logger:     log.New(&LogWriter{config_obj, responder}, "vql: ", 0),
+		Logger:     log.New(&LogWriter{config_obj, responder, ctx}, "vql: ", 0),
 	}
 
 	for _, env_spec := range arg.Env {
 		builder.Env.Set(env_spec.Key, env_spec.Value)
 	}
 
-	scope := builder.Build()
+	scope := manager.BuildScope(builder)
 	defer scope.Close()
+
+	if runtime.GOARCH == "386" &&
+		os.Getenv("PROCESSOR_ARCHITEW6432") == "AMD64" {
+		scope.Log("You are running a 32 bit built binary on Windows x64. " +
+			"This configuration is not supported and may result in " +
+			"incorrect or missed results or even crashes.")
+	}
 
 	scope.Log("Starting query execution.")
 
 	vfilter.InstallThrottler(scope, vfilter.NewTimeThrottler(float64(rate)))
 
+	start := time.Now()
+
 	// If we panic we need to recover and report this to the
 	// server.
 	defer func() {
+
 		r := recover()
 		if r != nil {
 			msg := string(debug.Stack())
 			scope.Log(msg)
-			responder.RaiseError(msg)
+			responder.RaiseError(ctx, msg)
 		}
+
+		scope.Log("Collection is done after %v", time.Since(start))
 	}()
 
 	// All the queries will use the same scope. This allows one
 	// query to define functions for the next query in order.
 	for query_idx, query := range arg.Query {
+		query_log := QueryLog.AddQuery(query.VQL)
+
 		query_start := uint64(time.Now().UTC().UnixNano() / 1000)
 		vql, err := vfilter.Parse(query.VQL)
 		if err != nil {
-			responder.RaiseError(err.Error())
+			responder.RaiseError(ctx, err.Error())
+			query_log.Close()
 			return
 		}
 
 		result_chan := vfilter.GetResponseChannel(
 			vql, sub_ctx, scope,
-			vql_subsystem.MarshalJson(scope),
+			vql_subsystem.MarshalJsonl(scope),
 			int(max_row),
 			int(max_wait))
 	run_query:
@@ -165,7 +194,7 @@ func (self VQLClientAction) StartQuery(
 				scope.Log(msg)
 
 				// Queries that time out are an error on the server.
-				responder.RaiseError(msg)
+				responder.RaiseError(ctx, msg)
 
 				// Cancel the sub ctx but do not exit
 				// - we need to wait for the sub query
@@ -178,8 +207,14 @@ func (self VQLClientAction) StartQuery(
 				// Try again after a while to prevent spinning here.
 				deadline = time.After(time.Second * time.Duration(timeout))
 
+			case <-time.After(time.Second * time.Duration(heartbeat)):
+				responder.Log(ctx, "Time %v: %s: Waiting for rows.",
+					(uint64(time.Now().UTC().UnixNano()/1000)-
+						query_start)/1000000, query.Name)
+
 			case result, ok := <-result_chan:
 				if !ok {
+					query_log.Close()
 					break run_query
 				}
 				// Skip let queries since they never produce results.
@@ -187,15 +222,17 @@ func (self VQLClientAction) StartQuery(
 					continue
 				}
 				response := &actions_proto.VQLResponse{
-					Query:     query,
-					QueryId:   uint64(query_idx),
-					Part:      uint64(result.Part),
-					Response:  string(result.Payload),
-					Timestamp: uint64(time.Now().UTC().UnixNano() / 1000),
+					Query:         query,
+					QueryId:       uint64(query_idx),
+					Part:          uint64(result.Part),
+					JSONLResponse: string(result.Payload),
+					TotalRows:     uint64(result.TotalRows),
+					Timestamp:     uint64(time.Now().UTC().UnixNano() / 1000),
 				}
+
 				// Don't log empty VQL statements.
 				if query.Name != "" {
-					responder.Log(
+					responder.Log(ctx,
 						"Time %v: %s: Sending response part %d %s (%d rows).",
 						(response.Timestamp-query_start)/1000000,
 						query.Name,
@@ -205,15 +242,15 @@ func (self VQLClientAction) StartQuery(
 					)
 				}
 				response.Columns = result.Columns
-				responder.AddResponse(&crypto_proto.GrrMessage{
+				responder.AddResponse(ctx, &crypto_proto.GrrMessage{
 					VQLResponse: response})
 			}
 		}
 	}
 
 	if uploader.Count > 0 {
-		responder.Log("Uploaded %v files.", uploader.Count)
+		responder.Log(ctx, "Uploaded %v files.", uploader.Count)
 	}
 
-	responder.Return()
+	responder.Return(ctx)
 }

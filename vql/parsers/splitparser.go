@@ -51,7 +51,7 @@ type _SplitRecordParser struct{}
 
 func processFile(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	file string, arg *_SplitRecordParserArgs,
 	output_chan chan vfilter.Row) {
 
@@ -120,14 +120,19 @@ func processFile(
 					result.Set(column, vfilter.Null{})
 				}
 			}
-			output_chan <- result
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- result:
+			}
 		}
 	}
 }
 
 func (self _SplitRecordParser) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	var compiled_regex *regexp.Regexp
@@ -175,7 +180,7 @@ func (self _SplitRecordParser) Name() string {
 	return "split_records"
 }
 
-func (self _SplitRecordParser) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _SplitRecordParser) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "split_records",
 		Doc:     "Parses files by splitting lines into records.",

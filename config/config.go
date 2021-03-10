@@ -36,16 +36,20 @@ var (
 )
 
 // Return the location of the writeback file.
-func WritebackLocation(self *config_proto.Config) string {
+func WritebackLocation(self *config_proto.Config) (string, error) {
+	if self.Client == nil {
+		return "", errors.New("Client not configured")
+	}
+
 	switch runtime.GOOS {
 	case "darwin":
-		return os.ExpandEnv(self.Client.WritebackDarwin)
+		return os.ExpandEnv(self.Client.WritebackDarwin), nil
 	case "linux":
-		return os.ExpandEnv(self.Client.WritebackLinux)
+		return os.ExpandEnv(self.Client.WritebackLinux), nil
 	case "windows":
-		return os.ExpandEnv(self.Client.WritebackWindows)
+		return os.ExpandEnv(self.Client.WritebackWindows), nil
 	default:
-		return os.ExpandEnv(self.Client.WritebackLinux)
+		return os.ExpandEnv(self.Client.WritebackLinux), nil
 	}
 }
 
@@ -66,7 +70,8 @@ func GetDefaultConfig() *config_proto.Config {
 			WritebackLinux:  "/etc/velociraptor.writeback.yaml",
 			WritebackWindows: "$ProgramFiles\\Velociraptor\\" +
 				"velociraptor.writeback.yaml",
-			MaxPoll: 60,
+			TempdirWindows: "$ProgramFiles\\Velociraptor\\Tools",
+			MaxPoll:        60,
 
 			// Local ring buffer to queue messages to the
 			// server. If the server is not available we
@@ -128,15 +133,17 @@ func GetDefaultConfig() *config_proto.Config {
 
 			// A public interface for clients to
 			// connect to.
-			BindAddress:   "0.0.0.0",
-			BindPort:      8000,
-			MaxUploadSize: constants.MAX_MEMORY * 2,
+			BindAddress: "0.0.0.0",
+			BindPort:    8000,
 			DefaultClientMonitoringArtifacts: []string{
 				// Essential for client resource telemetry.
 				"Generic.Client.Stats",
 			},
-			DynDns:          &config_proto.DynDNSConfig{},
-			ExpectedClients: 10000,
+			DynDns: &config_proto.DynDNSConfig{},
+			Resources: &config_proto.FrontendResourceControl{
+				ExpectedClients: 10000,
+				MaxUploadSize:   constants.MAX_MEMORY * 2,
+			},
 			GRPCPoolMaxSize: 100,
 			GRPCPoolMaxWait: 60,
 		},
@@ -188,8 +195,9 @@ func WriteConfigToFile(filename string, config *config_proto.Config) error {
 
 // Update the client's writeback file.
 func UpdateWriteback(config_obj *config_proto.Config) error {
-	if WritebackLocation(config_obj) == "" {
-		return nil
+	location, err := WritebackLocation(config_obj)
+	if err != nil {
+		return err
 	}
 
 	bytes, err := yaml.Marshal(config_obj.Writeback)
@@ -198,7 +206,7 @@ func UpdateWriteback(config_obj *config_proto.Config) error {
 	}
 
 	// Make sure the new file is only readable by root.
-	err = ioutil.WriteFile(WritebackLocation(config_obj), bytes, 0600)
+	err = ioutil.WriteFile(location, bytes, 0600)
 	if err != nil {
 		return errors.WithStack(err)
 	}

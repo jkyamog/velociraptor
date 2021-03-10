@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,7 +71,7 @@ type YaraScanPlugin struct{}
 
 func (self YaraScanPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -104,7 +105,6 @@ func (self YaraScanPlugin) Call(
 
 		rules, err := getYaraRules(arg.Key, arg.Rules, scope)
 		if err != nil {
-			scope.Log("Failed to initialize YARA compiler: %s", err)
 			return
 		}
 
@@ -114,7 +114,8 @@ func (self YaraScanPlugin) Call(
 			// into memory avoiding the need for
 			// buffering.
 			if arg.Accessor == "" {
-				err := scanFile(filename, arg.Context, arg.NumberOfHits,
+				err := scanFile(ctx, filename, arg.Context,
+					arg.NumberOfHits,
 					rules, output_chan, scope)
 
 				// Fall back to accessor scanning if
@@ -124,7 +125,7 @@ func (self YaraScanPlugin) Call(
 				}
 			}
 
-			scanFileByAccessor(filename, arg.Accessor,
+			scanFileByAccessor(ctx, filename, arg.Accessor,
 				arg.Blocksize, arg.Start, arg.End,
 				arg.Context, arg.NumberOfHits,
 				rules, output_chan, scope)
@@ -139,8 +140,7 @@ func (self YaraScanPlugin) Call(
 // to recompile the rules all the time. We use the key as the cache or
 // the hash of the rules string if not provided.
 func getYaraRules(key, rules string,
-	scope *vfilter.Scope) (*yara.Rules, error) {
-	var err error
+	scope vfilter.Scope) (*yara.Rules, error) {
 
 	// Try to get the compiled yara expression from the
 	// scope cache.
@@ -149,21 +149,33 @@ func getYaraRules(key, rules string,
 		rule_hash := md5.Sum([]byte(rules))
 		key = string(rule_hash[:])
 	}
-	result, ok := vql_subsystem.CacheGet(scope, key).(*yara.Rules)
-	if !ok {
+	result := vql_subsystem.CacheGet(scope, key)
+	if result == nil {
 		variables := make(map[string]interface{})
 		generated_rules := RuleGenerator(scope, rules)
-		result, err = yara.Compile(generated_rules, variables)
+		result, err := yara.Compile(generated_rules, variables)
 		if err != nil {
+			// Cache the compile failure so only one log is emitted.
+			scope.Log("Failed to initialize YARA compiler: %s", err)
+			vql_subsystem.CacheSet(scope, key, err)
 			return nil, err
 		}
 		vql_subsystem.CacheSet(scope, key, result)
+		return result, nil
 	}
 
-	return result, nil
+	switch t := result.(type) {
+	case error:
+		return nil, t
+	case *yara.Rules:
+		return t, nil
+	default:
+		return nil, errors.New("Error")
+	}
 }
 
 func scanFileByAccessor(
+	ctx context.Context,
 	filename, accessor_name string,
 	blocksize int64,
 	start, end uint64,
@@ -171,7 +183,7 @@ func scanFileByAccessor(
 	total_number_of_hits int64,
 	rules *yara.Rules,
 	output_chan chan vfilter.Row,
-	scope *vfilter.Scope) {
+	scope vfilter.Scope) {
 
 	accessor, err := glob.GetAccessor(accessor_name, scope)
 	if err != nil {
@@ -194,7 +206,7 @@ func scanFileByAccessor(
 
 	// Try to seek to the start offset - if it does not work then
 	// dont worry about it - just start from the beginning.
-	f.Seek(int64(start), 0)
+	_, _ = f.Seek(int64(start), 0)
 
 	buf := make([]byte, blocksize)
 
@@ -208,6 +220,7 @@ func scanFileByAccessor(
 		file_info:      stat,
 		filename:       filename,
 		base_offset:    start,
+		ctx:            ctx,
 	}
 
 	for {
@@ -236,12 +249,13 @@ func scanFileByAccessor(
 }
 
 func scanFile(
+	ctx context.Context,
 	filename string,
 	context int,
 	total_number_of_hits int64,
 	rules *yara.Rules,
 	output_chan chan vfilter.Row,
-	scope *vfilter.Scope) error {
+	scope vfilter.Scope) error {
 
 	yara_flag := yara.ScanFlags(0)
 	if total_number_of_hits == 1 {
@@ -263,6 +277,7 @@ func scanFile(
 		file_info:      stat,
 		filename:       filename,
 		reader:         fd,
+		ctx:            ctx,
 	}
 
 	err = rules.ScanFileWithCallback(
@@ -292,6 +307,7 @@ type scanReporter struct {
 	base_offset    uint64
 	end            uint64
 	reader         io.ReaderAt
+	ctx            context.Context
 }
 
 func (self *scanReporter) RuleMatching(rule *yara.Rule) (bool, error) {
@@ -306,7 +322,12 @@ func (self *scanReporter) RuleMatching(rule *yara.Rule) (bool, error) {
 			File:     self.file_info,
 			FileName: self.filename,
 		}
-		self.output_chan <- res
+		select {
+		case <-self.ctx.Done():
+			return false, nil
+
+		case self.output_chan <- res:
+		}
 		self.number_of_hits--
 		if self.number_of_hits <= 0 {
 			return false, nil
@@ -376,7 +397,7 @@ func getMatchStrings(r *yara.Rule) (matchstrings []yara.MatchString) {
 }
 
 func (self YaraScanPlugin) Info(
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "yara",
@@ -395,18 +416,18 @@ type YaraProcPluginArgs struct {
 type YaraProcPlugin struct{}
 
 func (self YaraProcPlugin) Info(
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "proc_yara",
 		Doc:     "Scan processes using yara rules.",
-		ArgType: type_map.AddType(scope, &YaraScanPluginArgs{}),
+		ArgType: type_map.AddType(scope, &YaraProcPluginArgs{}),
 	}
 }
 
 func (self YaraProcPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -442,12 +463,17 @@ func (self YaraProcPlugin) Call(
 			arg.Pid, yara.ScanFlagsProcessMemory,
 			300*time.Second)
 		if err != nil {
-			scope.Log("Failed: %v", err)
+			scope.Log("proc_yara: pid %v: %v", arg.Pid, err)
 			return
 		}
 
 		for _, match := range matches {
-			output_chan <- match
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- match:
+			}
 		}
 
 		vfilter.ChargeOp(scope)
@@ -457,7 +483,7 @@ func (self YaraProcPlugin) Call(
 }
 
 // Provide a shortcut way to define common rules.
-func RuleGenerator(scope *vfilter.Scope, rule string) string {
+func RuleGenerator(scope vfilter.Scope, rule string) string {
 	rule = strings.TrimSpace(rule)
 
 	// Just a normal yara rule

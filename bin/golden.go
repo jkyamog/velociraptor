@@ -24,21 +24,22 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/Velocidex/yaml/v2"
 	"github.com/sergi/go-diff/diffmatchpatch"
+	"github.com/shirou/gopsutil/process"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
-	artifacts "www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
-	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/startup"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/tools"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -48,8 +49,14 @@ var (
 	golden_command = app.Command(
 		"golden", "Run tests and compare against golden files.")
 
-	golden_command_prefix = golden_command.Arg(
-		"prefix", "Golden file prefix").Required().String()
+	golden_command_directory = golden_command.Arg(
+		"directory", "Golden file directory path").Required().String()
+
+	golden_command_filter = golden_command.Flag("filter", "A regex to filter the test files").
+				String()
+
+	golden_env_map = golden_command.Flag("env", "Environment for the query.").
+			StringMap()
 
 	testonly = golden_command.Flag("testonly", "Do not update the fixture.").Bool()
 )
@@ -65,42 +72,95 @@ type testFixture struct {
 func vqlCollectorArgsFromFixture(
 	config_obj *config_proto.Config,
 	fixture *testFixture) *actions_proto.VQLCollectorArgs {
-	artifact_collector_args := &flows_proto.ArtifactCollectorArgs{
-		Parameters: &flows_proto.ArtifactParameters{},
-	}
 
+	vql_collector_args := &actions_proto.VQLCollectorArgs{}
 	for k, v := range fixture.Parameters {
-		artifact_collector_args.Parameters.Env = append(
-			artifact_collector_args.Parameters.Env,
+		vql_collector_args.Env = append(vql_collector_args.Env,
 			&actions_proto.VQLEnv{Key: k, Value: v})
 	}
 
-	vql_collector_args := &actions_proto.VQLCollectorArgs{}
-	err := services.AddArtifactCollectorArgs(
-		config_obj,
-		vql_collector_args,
-		artifact_collector_args)
-	kingpin.FatalIfError(err, "vqlCollectorArgsFromFixture")
-
 	return vql_collector_args
+}
+
+func makeCtxWithTimeout(duration int) (context.Context, func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*60)
+
+	deadline := time.Now().Add(time.Second * time.Duration(duration))
+	fmt.Printf("Setting deadline to %v\n", deadline)
+
+	// Set an alarm for hard exit in 2 minutes. If we hit it then
+	// the code is deadlocked and we want to know what is
+	// happening.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Printf("Disarming alarm\n")
+				return
+
+				// If we get here we are deadlocked! Print all
+				// the goroutines and mutex and hard exit.
+			case <-time.After(time.Second):
+				if time.Now().Before(deadline) {
+					proc, _ := process.NewProcess(int32(os.Getpid()))
+					total_time, _ := proc.Percent(0)
+					memory, _ := proc.MemoryInfo()
+
+					fmt.Printf("Not time to fire yet %v %v %v\n",
+						time.Now(), total_time, memory)
+					continue
+				}
+
+				p := pprof.Lookup("goroutine")
+				if p != nil {
+					_ = p.WriteTo(os.Stdout, 1)
+				}
+
+				p = pprof.Lookup("mutex")
+				if p != nil {
+					_ = p.WriteTo(os.Stdout, 1)
+				}
+
+				os.Stdout.Close()
+
+				// Hard exit with an error.
+				os.Exit(-1)
+			}
+		}
+	}()
+
+	return ctx, cancel
 }
 
 func runTest(fixture *testFixture,
 	config_obj *config_proto.Config) (string, error) {
 
-	err := services.StartJournalService(config_obj)
-	kingpin.FatalIfError(err, "Unable to start services")
+	ctx, cancel := makeCtxWithTimeout(30)
+	defer cancel()
+
+	//Force a clean slate for each test.
+	startup.Reset()
+
+	sm, err := startEssentialServices(config_obj)
+	if err != nil {
+		return "", err
+	}
+	defer sm.Close()
+
+	_, err = getRepository(config_obj)
+	kingpin.FatalIfError(err, "Loading extra artifacts")
 
 	// Create an output container.
 	tmpfile, err := ioutil.TempFile("", "golden")
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer os.Remove(tmpfile.Name())
 
-	container, err := reporting.NewContainer(tmpfile.Name())
+	container, err := reporting.NewContainer(tmpfile.Name(), "", 5)
 	kingpin.FatalIfError(err, "Can not create output container")
 
-	builder := artifacts.ScopeBuilder{
+	builder := services.ScopeBuilder{
 		Config:     config_obj,
 		ACLManager: vql_subsystem.NewRoleACLManager("administrator"),
 		Logger:     log.New(&LogWriter{config_obj}, "Velociraptor: ", 0),
@@ -110,8 +170,8 @@ func runTest(fixture *testFixture,
 			Set(constants.SCOPE_MOCK, &tools.MockingScopeContext{}),
 	}
 
-	if env_map != nil {
-		for k, v := range *env_map {
+	if golden_env_map != nil {
+		for k, v := range *golden_env_map {
 			builder.Env.Set(k, v)
 		}
 	}
@@ -122,13 +182,16 @@ func runTest(fixture *testFixture,
 	}
 
 	// Cleanup after the query.
-	scope := builder.BuildFromScratch()
+	manager, err := services.GetRepositoryManager()
+	kingpin.FatalIfError(err, "GetRepositoryManager")
+	scope := manager.BuildScopeFromScratch(builder)
 	defer scope.Close()
 
-	scope.AddDestructor(func() {
+	err = scope.AddDestructor(func() {
 		container.Close()
 		os.Remove(tmpfile.Name()) // clean up
 	})
+	kingpin.FatalIfError(err, "AddDestructor")
 
 	result := ""
 	for _, query := range fixture.Queries {
@@ -138,10 +201,6 @@ func runTest(fixture *testFixture,
 		if err != nil {
 			return "", err
 		}
-
-		ctx, cancel := context.WithTimeout(
-			context.Background(), 60*time.Second)
-		defer cancel()
 
 		result_chan := vfilter.GetResponseChannel(
 			vql, ctx, scope,
@@ -160,23 +219,31 @@ func runTest(fixture *testFixture,
 }
 
 func doGolden() {
+	_, cancel := makeCtxWithTimeout(120)
+	defer cancel()
+
 	config_obj, err := DefaultConfigLoader.LoadAndValidate()
 	kingpin.FatalIfError(err, "Can not load configuration.")
 
 	logger := logging.GetLogger(config_obj, &logging.ToolComponent)
 	logger.Info("Starting golden file test.")
 
-	globs, err := filepath.Glob(fmt.Sprintf(
-		"%s*.in.yaml", *golden_command_prefix))
-	kingpin.FatalIfError(err, "Glob")
-
 	failures := []string{}
 
-	for _, filename := range globs {
+	err = filepath.Walk(*golden_command_directory, func(file_path string, info os.FileInfo, err error) error {
+		if *golden_command_filter != "" &&
+			!strings.HasPrefix(filepath.Base(file_path), *golden_command_filter) {
+			return nil
+		}
+
+		if !strings.HasSuffix(file_path, ".in.yaml") {
+			return nil
+		}
+
 		logger := log.New(os.Stderr, "golden: ", 0)
 
-		logger.Printf("Openning %v", filename)
-		data, err := ioutil.ReadFile(filename)
+		logger.Printf("Opening %v", file_path)
+		data, err := ioutil.ReadFile(file_path)
 		kingpin.FatalIfError(err, "Reading file")
 
 		fixture := testFixture{}
@@ -186,23 +253,23 @@ func doGolden() {
 		result, err := runTest(&fixture, config_obj)
 		kingpin.FatalIfError(err, "Running test")
 
-		outfile := strings.Replace(filename, ".in.", ".out.", -1)
+		outfile := strings.Replace(file_path, ".in.", ".out.", -1)
 		old_data, err := ioutil.ReadFile(outfile)
 		if err == nil {
 			if strings.TrimSpace(string(old_data)) != strings.TrimSpace(result) {
 				dmp := diffmatchpatch.New()
 				diffs := dmp.DiffMain(
 					string(old_data), result, false)
-				fmt.Printf("Failed %v:\n", filename)
+				fmt.Printf("Failed %v:\n", file_path)
 				fmt.Println(dmp.DiffPrettyText(diffs))
 
-				failures = append(failures, filename)
+				failures = append(failures, file_path)
 			}
 		} else {
-			fmt.Printf("New file for  %v:\n", filename)
+			fmt.Printf("New file for  %v:\n", file_path)
 			fmt.Println(result)
 
-			failures = append(failures, filename)
+			failures = append(failures, file_path)
 		}
 
 		if !*testonly {
@@ -211,6 +278,11 @@ func doGolden() {
 				[]byte(result), 0666)
 			kingpin.FatalIfError(err, "Unable to write golden file")
 		}
+		return nil
+	})
+
+	if err != nil {
+		kingpin.Fatalf("golden error: %s", err)
 	}
 
 	if len(failures) > 0 {

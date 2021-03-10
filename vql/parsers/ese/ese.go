@@ -46,7 +46,7 @@ type _SRUMLookupIdArgs struct {
 
 type _SRUMLookupId struct{}
 
-func (self _SRUMLookupId) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self _SRUMLookupId) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "srum_lookup_id",
 		Doc:     "Lookup a SRUM id.",
@@ -55,7 +55,7 @@ func (self _SRUMLookupId) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) 
 }
 
 func (self _SRUMLookupId) Call(
-	ctx context.Context, scope *vfilter.Scope,
+	ctx context.Context, scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	defer utils.RecoverVQL(scope)
@@ -93,7 +93,7 @@ func (self _SRUMLookupId) Call(
 		defer fd.Close()
 
 		reader, err := ntfs.NewPagedReader(
-			utils.ReaderAtter{fd}, 1024, 10000)
+			utils.ReaderAtter{Reader: fd}, 1024, 10000)
 		if err != nil {
 			scope.Log("parse_mft: Unable to open file %s: %v",
 				arg.Filename, err)
@@ -155,7 +155,7 @@ func formatString(hexencoded string) string {
 		return hexencoded
 	}
 
-	return ParseTerminatedUTF16String(&utils.BufferReaderAt{buffer}, 0)
+	return ParseTerminatedUTF16String(&utils.BufferReaderAt{Buffer: buffer}, 0)
 }
 
 func formatGUI(hexencoded string) string {
@@ -169,7 +169,7 @@ func formatGUI(hexencoded string) string {
 	}
 
 	profile := NewMiscProfile()
-	return profile.SID(&utils.BufferReaderAt{buffer}, 0).String()
+	return profile.SID(&utils.BufferReaderAt{Buffer: buffer}, 0).String()
 }
 
 type _ESEArgs struct {
@@ -182,7 +182,7 @@ type _ESEPlugin struct{}
 
 func (self _ESEPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	go func() {
@@ -220,7 +220,7 @@ func (self _ESEPlugin) Call(
 		defer fd.Close()
 
 		reader, err := ntfs.NewPagedReader(
-			utils.ReaderAtter{fd}, 1024, 10000)
+			utils.ReaderAtter{Reader: fd}, 1024, 10000)
 		if err != nil {
 			scope.Log("parse_mft: Unable to open file %s: %v",
 				arg.Filename, err)
@@ -245,8 +245,7 @@ func (self _ESEPlugin) Call(
 			select {
 			case <-ctx.Done():
 				return errors.New("Query is cancelled")
-			default:
-				output_chan <- row
+			case output_chan <- row:
 			}
 			return nil
 		})
@@ -260,7 +259,7 @@ func (self _ESEPlugin) Call(
 	return output_chan
 }
 
-func (self _ESEPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _ESEPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "parse_ese",
 		Doc:     "Opens an ESE file and dump a table.",

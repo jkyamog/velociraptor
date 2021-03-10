@@ -86,8 +86,12 @@ func cert_walker(cert *C.char, len C.int,
 
 	result := pointer.Restore(unsafe.Pointer(ctx)).(*certContext)
 	for _, c := range certificates {
+		if c == nil || c.SerialNumber == nil {
+			continue
+		}
 		cert_context := &CertContext{
-			c, string(utf16.Decode(store_name))}
+			Certificate: c,
+			Store:       string(utf16.Decode(store_name))}
 
 		result.Certs = append(result.Certs, cert_context)
 	}
@@ -147,7 +151,7 @@ func (self *CertContext) HexSerialNumber() string {
 	return self.SerialNumber.Text(16)
 }
 
-func runCertificates(scope *vfilter.Scope,
+func runCertificates(scope vfilter.Scope,
 	args *ordereddict.Dict) []vfilter.Row {
 	var result []vfilter.Row
 

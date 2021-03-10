@@ -9,7 +9,7 @@ package proto;
 
 option go_package = "www.velocidex.com/golang/velociraptor/config/proto";
 
-// Information about Velociraptor. This is a psuedo config item - it
+// Information about Velociraptor. This is a pseudo config item - it
 // will never be read from config files, but can be used in VQL
 // queries. It will be written to config files as metadata about the
 // version that produced the config file.
@@ -52,7 +52,10 @@ message Writeback {
     VQLEventTable event_queries = 1;
 }
 
-// Configuration for the windows installer.
+// Configuration for the windows installer. NOTE: This is not used
+// much - it is only used when running `velociraptor service
+// install`. We typically use an MSI to deploy (see the docs/wix/
+// directory).
 message WindowsInstallerConfig {
     string service_name = 1 [(sem_type) = {
             description: "The name of the service to create."
@@ -104,7 +107,7 @@ message RingBufferConfig {
 
 message ClientConfig {
     repeated string labels = 6 [(sem_type) = {
-            description: "A list of labels the client has. This allows selected groups of clients to be targetted in hunts."
+            description: "A list of labels the client has. This allows selected groups of clients to be targeted in hunts."
         }];
 
     repeated string server_urls = 8 [(sem_type) = {
@@ -130,6 +133,15 @@ message ClientConfig {
     string writeback_windows = 10 [(sem_type) = {
             description: "A path where windows clients will write local state."
         }];
+
+    // A path to set the temp directory. If not set we use the system
+    // default. The path may be relative to the current directory
+    // (usually the location of the executable). If the path does not
+    // exist we fall back to the system temp directory.
+    string tempdir_linux = 1;
+    string tempdir_windows = 2;
+    string tempdir_darwin = 3;
+
 
     uint64 max_poll = 15 [(sem_type) = {
             description: "The maximum number of seconds between server polls."
@@ -180,10 +192,13 @@ message ClientConfig {
         }];
 
     uint64 max_memory_hard_limit = 29;
+
+    // Maximum number of concurrent queries the client will allow (default 2).
+    uint64 concurrency = 31;
 }
 
 message APIConfig {
-    // Publically accessible hostname.
+    // Publicly accessible hostname.
     string hostname = 5;
 
     string bind_address = 1 [(sem_type) = {
@@ -240,7 +255,10 @@ message GUILink {
 message Authenticator {
     string type = 1;
 
-    // OAuth2 Authenticator (Google, Github, Azure etc).
+    // OIDC/OAuth2 Authenticator (Google, Github, Azure etc).
+    string oidc_issuer = 4 [(sem_type) = {
+            description: "URL to OIDC Configuration Document. The configuration should be available in the 'oidc_issuer + /.well-known/openid-configuration' endpoint. ",
+        }];
     string oauth_client_id = 5 [(sem_type) = {
             description: "If set we use oauth authentication flow.",
         }];
@@ -283,6 +301,9 @@ message GUIConfig {
     // GUI **will not work** without a TLS proxy because the csrf
     // cookie is set to secure only.
     bool use_plain_http = 20;
+
+    // Serve the GUI from this base path instead of "/"
+    string base_path = 21;
 
     string gw_certificate = 10 [(sem_type) = {
             description: "The GUI exposes a HTTP interface to the gRPC end point."
@@ -369,6 +390,41 @@ message DynDNSConfig {
     uint64 frequency = 5;
 }
 
+message FrontendResourceControl {
+    // Connections are limited to this rate - faster client
+    // connections will result in 500 errors which will in turn cause
+    // the clients to back off. This mechanism allows the server to
+    // loadshed client connections.
+    uint64 connections_per_second = 1;
+
+    // How fast to notify clients of a new hunt creation (We dont want
+    // to overwhelm the server so we limit client notifications).
+    uint64 notifications_per_second = 2;
+
+    uint64 concurrency = 9 [(sem_type) = {
+            description: "The number of client messages to process concurrently.",
+        }];
+
+    uint64 max_upload_size = 11 [(sem_type) = {
+             description: "Maximum size in Bytes we will accept uploads for"
+        }];
+
+    // Various performoance related tweaks.
+    int64 expected_clients = 15 [(sem_type) = {
+            description: "Expected number of clients in this deployment (default 10000)",
+        }];
+
+    // Per client rate in bytes/sec
+    int64 per_client_upload_rate = 21;
+    int64 global_upload_rate = 22;
+
+    // Wait time for collecting events from clients - smaller means
+    // less latency to respond to client events but also means more
+    // TLS handshake and network overheads due to frequent POST.
+    uint64 client_event_max_wait = 23;
+}
+
+
 message FrontendConfig {
     string public_path = 8 [deprecated=true];
 
@@ -383,6 +439,9 @@ message FrontendConfig {
             description: "Port to bind to."
         }];
 
+    // Serve the GUI from this base path instead of "/"
+    string base_path = 25;
+
     // This allows the frontends to listen on plain HTTP - It is
     // useful if you have SSL offloading (e.g. ngix). This is not
     // configured by the wizard - you will need to manually configure
@@ -390,6 +449,16 @@ message FrontendConfig {
     bool use_plain_http = 24;
 
 
+    // If this is true, other frontends will not automatically
+    // redirect to this frontend. This is required when you have an
+    // external load balancer which will take care of redirection.1
+    bool do_not_redirect = 26;
+
+    // These are used to secure the client/server communications -
+    // Even when using external TLS certificates! This certificate
+    // must be signed by the Velociraptor rooot CA in all cases. If
+    // using an external TLS configuration this layer of encryption
+    // happens **in addition** to the external TLS certificates.
     string certificate = 3 [(sem_type) = {
             description: "X509 Certificate of frontend server."
         }];
@@ -398,12 +467,20 @@ message FrontendConfig {
             description: "The private key of the frontend server encoded in PEM format."
         }];
 
+    // If you want to use your own certificates for TLS as an
+    // alternative to Autocert, then you can set those here. These
+    // certificates will be used for TLS on both the frontend and
+    // GUI. NOTE: We expect these to be proper certificates - i.e. NOT
+    // self signed. Velociraptor only supports self signed
+    // certificates issued by the Velociraptor CA embedded in the
+    // client's config file.
+
+    // Be sure to set Client.use_self_signed_ssl=false when you set this.
+    string tls_certificate_filename = 28;
+    string tls_private_key_filename = 29;
+
     string dns_name = 6 [(sem_type) = {
             description: "The DNS name of the frontend."
-        }];
-
-    uint64 concurrency = 9 [(sem_type) = {
-            description: "The number of client messages to process concurrently.",
         }];
 
     bool do_not_compress_artifacts = 10 [(sem_type) = {
@@ -411,10 +488,6 @@ message FrontendConfig {
             "This is only useful for debugging. Note: Setting this will send the client "
             "artifact fields like name and description which may result in information "
             "disclosure if the client is untrusted."
-        }];
-
-    uint64 max_upload_size = 11 [(sem_type) = {
-             description: "Maximum size in Bytes we will accept uploads for"
         }];
 
     DynDNSConfig dyn_dns = 12 [(sem_type) = {
@@ -433,17 +506,28 @@ message FrontendConfig {
             description: "The user that the frontend should run as. If set we refuse to run as a different user.",
         }];
 
-    // Various performoance related tweaks.
-    int64 expected_clients = 15 [(sem_type) = {
-            description: "Expected number of clients in this deployment (default 10000)",
-        }];
-
     int64 GRPC_pool_max_size = 17;
     int64 GRPC_pool_max_wait = 18;
 
     // The services that will run on this frontend. If not set, all
     // services will run on the primary frontend.
     ServerServicesConfig server_services = 20;
+
+    FrontendResourceControl resources = 27;
+
+    // Below options are DEPRECATED - moved to resources by migration code.
+    uint64 concurrency = 9 [(sem_type) = {
+            description: "The number of client messages to process concurrently.",
+        }];
+
+    uint64 max_upload_size = 11 [(sem_type) = {
+             description: "Maximum size in Bytes we will accept uploads for"
+        }];
+
+    // Various performoance related tweaks.
+    int64 expected_clients = 15 [(sem_type) = {
+            description: "Expected number of clients in this deployment (default 10000)",
+        }];
 
     // Per client rate in bytes/sec
     int64 per_client_upload_rate = 21;
@@ -498,6 +582,18 @@ message MailConfig {
         }];
 }
 
+message LoggingRetentionConfig {
+    // How often to rotate the files in seconds.
+    uint64 rotation_time = 3;
+
+    // Maximum age of each file (File will be deleted after this time (1 year).
+    uint64 max_age = 4;
+
+    // If this is true this log source is disabled.
+    bool disabled = 5;
+
+}
+
 message LoggingConfig {
     string output_directory = 1 [(sem_type) = {
             description: "The location to write log files. "
@@ -517,6 +613,9 @@ message LoggingConfig {
             default: "31536000", // One year
         }];
 
+    LoggingRetentionConfig debug = 5;
+    LoggingRetentionConfig info = 6;
+    LoggingRetentionConfig error = 7;
 }
 
 message MonitoringConfig {

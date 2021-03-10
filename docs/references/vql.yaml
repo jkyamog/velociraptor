@@ -41,14 +41,39 @@
     type: bool
     repeated: false
     required: false
-  category: ""
+  category: server
+- name: artifact_delete
+  description: Deletes an artifact from the global repository.
+  type: Function
+  args:
+  - name: name
+    description: The Artifact to delete
+    type: string
+    repeated: false
+    required: false
+  category: server
+- name: artifact_set
+  description: Sets an artifact into the global repository.
+  type: Function
+  args:
+  - name: definition
+    description: Artifact definition in YAML
+    type: string
+    repeated: false
+    required: false
+  - name: prefix
+    description: Required name prefix
+    type: string
+    repeated: false
+    required: false
+  category: server
 - name: atoi
   description: Convert a string to an int.
   type: Function
   args:
   - name: string
     description: A string to convert to int
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   category: basic
@@ -193,6 +218,31 @@
     repeated: false
     required: false
   category: parsers
+- name: cache
+  description: Creates a cache object
+  type: Function
+  args:
+  - name: func
+    description: A function to evaluate
+    type: LazyExpr
+    repeated: false
+    required: true
+  - name: name
+    description: The global name of this cache (needed when more than one)
+    type: string
+    repeated: false
+    required: false
+  - name: key
+    description: Cache key to use.
+    type: string
+    repeated: false
+    required: true
+  - name: period
+    description: The latest age of the cache.
+    type: int64
+    repeated: false
+    required: false
+  category: basic
 - name: cancel_flow
   description: Cancels the flow.
   type: Function
@@ -231,6 +281,53 @@
   type: Plugin
   args: []
   category: plugin
+- name: client_delete
+  description: 'Delete all information related to a client. '
+  type: Plugin
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  - name: really_do_it
+    description: ""
+    type: bool
+    repeated: false
+    required: false
+  category: server
+- name: client_info
+  description: Returns client info (like the fqdn) from the datastore.
+  type: Function
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: server
+- name: client_metadata
+  description: Returns client metadata from the datastore. Client metadata is a set
+    of free form key/value data
+  type: Function
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: server
+- name: client_set_metadata
+  description: Sets client metadata. Client metadata is a set of free form key/value
+    data
+  type: Function
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: server
 - name: clients
   description: Retrieve the list of clients.
   type: Plugin
@@ -239,6 +336,16 @@
     description: 'Client search string. Can have the following prefixes: ''lable:'',
       ''host:'''
     type: string
+    repeated: false
+    required: false
+  - name: start
+    description: First client to fetch (0)'
+    type: uint64
+    repeated: false
+    required: false
+  - name: count
+    description: Maximum number of clients to fetch (1000)'
+    type: uint64
     repeated: false
     required: false
   - name: client_id
@@ -272,7 +379,7 @@
   args:
   - name: start
     description: Start at this time.
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: period
@@ -299,10 +406,15 @@
     description: A path to write the output file on.
     type: string
     repeated: false
-    required: true
+    required: false
+  - name: report
+    description: A path to write the report on.
+    type: string
+    repeated: false
+    required: false
   - name: args
     description: Optional parameters.
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: password
@@ -317,7 +429,18 @@
     required: false
   - name: artifact_definitions
     description: Optional additional custom artifacts.
-    type: vfilter.Any
+    type: Any
+    repeated: false
+    required: false
+  - name: template
+    description: The name of a template artifact (i.e. one which has report of type
+      HTML).
+    type: string
+    repeated: false
+    required: false
+  - name: level
+    description: Compression level between 0 (no compression) and 9.
+    type: int64
     repeated: false
     required: false
   category: plugin
@@ -339,8 +462,13 @@
     repeated: true
     required: true
   - name: env
+    description: Parameters to apply to the artifact (an alternative to a full spec)
+    type: Any
+    repeated: false
+    required: false
+  - name: spec
     description: Parameters to apply to the artifacts
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   category: server
@@ -393,10 +521,70 @@
   args:
   - name: items
     description: ""
-    type: vfilter.Any
+    type: Any
+    repeated: false
+    required: false
+  category: basic
+- name: create_flow_download
+  description: Creates a download pack for the flow.
+  type: Function
+  args:
+  - name: client_id
+    description: Client ID to export.
+    type: string
     repeated: false
     required: true
-  category: basic
+  - name: flow_id
+    description: The flow id to export.
+    type: string
+    repeated: false
+    required: true
+  - name: wait
+    description: If set we wait for the download to complete before returning.
+    type: bool
+    repeated: false
+    required: false
+  - name: type
+    description: Type of download to create (e.g. 'report') default a full zip file.
+    type: string
+    repeated: false
+    required: false
+  - name: template
+    description: Report template to use (defaults to Reporting.Default).
+    type: string
+    repeated: false
+    required: false
+  category: server
+- name: create_hunt_download
+  description: Creates a download pack for a hunt.
+  type: Function
+  args:
+  - name: hunt_id
+    description: Hunt ID to export.
+    type: string
+    repeated: false
+    required: true
+  - name: only_combined
+    description: If set we only export combined results.
+    type: bool
+    repeated: false
+    required: false
+  - name: wait
+    description: If set we wait for the download to complete before returning.
+    type: bool
+    repeated: false
+    required: false
+  - name: format
+    description: Format to export (csv,json) defaults to both.
+    type: string
+    repeated: false
+    required: false
+  - name: base
+    description: Base filename to write to.
+    type: string
+    repeated: false
+    required: false
+  category: server
 - name: dict
   description: Construct a dict from arbitrary keyword args.
   type: Function
@@ -448,7 +636,7 @@
   args:
   - name: query
     description: Source for cached rows.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   - name: key
@@ -500,7 +688,7 @@
   args:
   - name: query
     description: Source for rows to upload.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   - name: threads
@@ -563,7 +751,7 @@
   args:
   - name: string
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   - name: type
@@ -578,9 +766,9 @@
   args:
   - name: items
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
-    required: true
+    required: false
   category: basic
 - name: enumerate_flow
   description: Enumerate all the files that make up a flow.
@@ -729,7 +917,7 @@
   args:
   - name: query
     description: Source for cached rows.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   - name: max_age
@@ -740,6 +928,11 @@
   - name: max_rows
     description: Maximum number of rows to hold in the fifo.
     type: int64
+    repeated: false
+    required: false
+  - name: flush
+    description: If specified we flush all rows from cache after the call.
+    type: bool
     repeated: false
     required: false
   category: event
@@ -793,7 +986,7 @@
   type: Function
   args:
   - name: list
-    description: A list of items too filter
+    description: A list of items to filter
     type: string
     repeated: true
     required: true
@@ -838,7 +1031,7 @@
     type: string
     repeated: false
     required: true
-  category: ""
+  category: server
 - name: flows
   description: Retrieve the flows launched on each client.
   type: Plugin
@@ -865,12 +1058,12 @@
     required: true
   - name: foreach
     description: The variable to iterate over.
-    type: vfilter.LazyExpr
+    type: StoredQuery
     repeated: false
     required: true
   - name: query
     description: Run this query over the item.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: false
   category: plugin
@@ -880,17 +1073,27 @@
   args:
   - name: row
     description: A query or slice which generates rows.
-    type: vfilter.LazyExpr
+    type: LazyExpr
     repeated: false
     required: true
   - name: query
     description: Run this query for each row.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
-    required: true
+    required: false
   - name: async
-    description: If set we run all queries asyncronously.
+    description: If set we run all queries asyncronously (implies workers=1000).
     type: bool
+    repeated: false
+    required: false
+  - name: workers
+    description: Total number of asyncronous workers.
+    type: int64
+    repeated: false
+    required: false
+  - name: column
+    description: If set we only extract the column from row.
+    type: string
     repeated: false
     required: false
   category: plugin
@@ -905,7 +1108,7 @@
     required: true
   - name: args
     description: An array of elements to apply into the format string.
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   category: basic
@@ -930,7 +1133,7 @@
   args:
   - name: item
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: member
@@ -940,12 +1143,12 @@
     required: false
   - name: field
     description: ""
-    type: string
+    type: Any
     repeated: false
     required: false
   - name: default
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   category: basic
@@ -953,12 +1156,12 @@
   description: Retrieve the current client monitoring state.
   type: Function
   args: []
-  category: ""
+  category: server
 - name: get_server_monitoring
   description: Retrieve the current client monitoring state.
   type: Function
   args: []
-  category: ""
+  category: server
 - name: getpid
   description: Returns the current pid of the process.
   type: Function
@@ -1074,7 +1277,7 @@
     required: true
   - name: patterns
     description: Additional patterns.
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   category: parsers
@@ -1170,16 +1373,22 @@
     required: true
   - name: params
     description: Parameters to encode as POST or GET query strings
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: headers
     description: A dict of headers to send.
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: method
     description: HTTP method to use (GET, POST)
+    type: string
+    repeated: false
+    required: false
+  - name: data
+    description: If specified we write this raw data into a POST request instead of
+      encoding the params above.
     type: string
     repeated: false
     required: false
@@ -1232,11 +1441,31 @@
     type: string
     repeated: true
     required: true
-  - name: env
-    description: Parameters to apply to the artifacts
-    type: vfilter.Any
+  - name: expires
+    description: Number of seconds since epoch for expiry
+    type: uint64
     repeated: false
     required: false
+  - name: spec
+    description: Parameters to apply to the artifacts
+    type: Any
+    repeated: false
+    required: false
+  category: server
+- name: hunt_add
+  description: Assign a client to a hunt.
+  type: Function
+  args:
+  - name: ClientId
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  - name: HuntId
+    description: ""
+    type: string
+    repeated: false
+    required: true
   category: server
 - name: hunt_flows
   description: Retrieve the flows launched by a hunt.
@@ -1247,6 +1476,16 @@
     type: string
     repeated: false
     required: true
+  - name: start_row
+    description: The first row to show (used for paging).
+    type: int64
+    repeated: false
+    required: false
+  - name: limit
+    description: Number of rows to show (used for paging).
+    type: int64
+    repeated: false
+    required: false
   category: server
 - name: hunt_results
   description: Retrieve the results of a hunt.
@@ -1293,17 +1532,17 @@
   args:
   - name: condition
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   - name: then
     description: ""
-    type: vfilter.LazyExpr
+    type: LazyExpr
     repeated: false
-    required: true
+    required: false
   - name: else
     description: ""
-    type: vfilter.LazyExpr
+    type: LazyExpr
     repeated: false
     required: false
   category: basic
@@ -1323,17 +1562,17 @@
   args:
   - name: condition
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   - name: then
     description: ""
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   - name: else
     description: ""
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: false
   category: plugin
@@ -1356,7 +1595,7 @@
   args:
   - name: int
     description: The integer to round
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   category: plugin
@@ -1365,6 +1604,61 @@
   type: Plugin
   args: []
   category: windows
+- name: inventory
+  description: Retrieve the tools inventory.
+  type: Plugin
+  args: []
+  category: server
+- name: inventory_add
+  description: Add tool to ThirdParty inventory.
+  type: Function
+  args:
+  - name: tool
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  - name: serve_locally
+    description: ""
+    type: bool
+    repeated: false
+    required: false
+  - name: url
+    description: ""
+    type: string
+    repeated: false
+    required: false
+  - name: hash
+    description: ""
+    type: string
+    repeated: false
+    required: false
+  - name: filename
+    description: The name of the file on the endpoint
+    type: string
+    repeated: false
+    required: false
+  - name: file
+    description: An optional file to upload
+    type: string
+    repeated: false
+    required: false
+  - name: accessor
+    description: The accessor to use to read the file.
+    type: string
+    repeated: false
+    required: false
+  category: server
+- name: inventory_get
+  description: Get tool info from inventory service.
+  type: Function
+  args:
+  - name: tool
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: server
 - name: ip
   description: |
     Format an IP address.
@@ -1394,15 +1688,25 @@
     required: false
   category: plugin
 - name: items
+  description: Iterate over dict members producing _key and _value columns
+  type: Function
+  args:
+  - name: item
+    description: ""
+    type: Any
+    repeated: false
+    required: false
+  category: basic
+- name: items
   description: Enumerate all members of the item (similar to Pythons items() method.
   type: Plugin
   args:
   - name: item
     description: The item to enumerate.
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
-  category: ""
+  category: basic
 - name: join
   description: |
     Join all the args on a separator.
@@ -1447,7 +1751,22 @@
     required: true
   - name: args
     description: Positional args for the function.
-    type: vfilter.Any
+    type: Any
+    repeated: false
+    required: false
+  - name: key
+    description: If set use this key to cache the JS VM.
+    type: string
+    repeated: false
+    required: false
+  category: experimental
+- name: js_get
+  description: Get a variable's value from the JS VM.
+  type: Function
+  args:
+  - name: var
+    description: The variable to get from the JS VM.
+    type: string
     repeated: false
     required: true
   - name: key
@@ -1455,7 +1774,37 @@
     type: string
     repeated: false
     required: false
-  category: experimental
+  category: plugin
+- name: js_set
+  description: Set a variables value in the JS VM.
+  type: Function
+  args:
+  - name: var
+    description: The variable to set inside the JS VM.
+    type: string
+    repeated: false
+    required: true
+  - name: value
+    description: The value to set inside the VM.
+    type: Any
+    repeated: false
+    required: true
+  - name: key
+    description: If set use this key to cache the JS VM.
+    type: string
+    repeated: false
+    required: false
+  category: plugin
+- name: killkillkill
+  description: Kills the client and forces a restart - this is very aggresive!
+  type: Function
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: basic
 - name: label
   description: |
     Add the labels to the client. If op is 'remove' then remove these labels.
@@ -1483,7 +1832,7 @@
   args:
   - name: list
     description: A list of items too filter
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   category: basic
@@ -1566,9 +1915,29 @@
   args:
   - name: items
     description: ""
-    type: vfilter.Any
+    type: Any
+    repeated: false
+    required: false
+  category: basic
+- name: memoize
+  description: Memoize a query into memory.
+  type: Function
+  args:
+  - name: query
+    description: Query to expand into memory
+    type: LazyExpr
     repeated: false
     required: true
+  - name: key
+    description: The name of the column to use as a key.
+    type: string
+    repeated: false
+    required: true
+  - name: period
+    description: The latest age of the cache.
+    type: int64
+    repeated: false
+    required: false
   category: basic
 - name: min
   description: |
@@ -1588,9 +1957,9 @@
   args:
   - name: items
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
-    required: true
+    required: false
   category: basic
 - name: mock
   description: Mock a plugin.
@@ -1608,12 +1977,12 @@
     required: false
   - name: artifact
     description: The artifact to mock
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: results
     description: The result to return
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   category: utils
@@ -1668,13 +2037,28 @@
   type: Plugin
   args: []
   category: windows
+- name: notebook_delete
+  description: 'Delete a notebook with all its cells. '
+  type: Plugin
+  args:
+  - name: notebook_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  - name: really_do_it
+    description: ""
+    type: bool
+    repeated: false
+    required: false
+  category: server
 - name: now
   description: Returns current time in seconds since epoch.
   type: Function
   args:
   - name: string
     description: A string to convert to int
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   category: basic
@@ -1703,6 +2087,76 @@
     repeated: false
     required: false
   category: parsers
+- name: parallelize
+  description: Runs query on result batches in parallel.
+  type: Plugin
+  args:
+  - name: query
+    description: The query will be run in parallel over batches.
+    type: StoredQuery
+    repeated: false
+    required: true
+  - name: client_id
+    description: The client id to extract
+    type: string
+    repeated: false
+    required: false
+  - name: flow_id
+    description: A flow ID (client or server artifacts)
+    type: string
+    repeated: false
+    required: false
+  - name: hunt_id
+    description: Retrieve sources from this hunt (combines all results from all clients)
+    type: string
+    repeated: false
+    required: false
+  - name: artifact
+    description: The name of the artifact collection to fetch
+    type: string
+    repeated: false
+    required: false
+  - name: source
+    description: An optional named source within the artifact
+    type: string
+    repeated: false
+    required: false
+  - name: start_time
+    description: Start return events from this date (for event sources)
+    type: int64
+    repeated: false
+    required: false
+  - name: end_time
+    description: Stop end events reach this time (event sources).
+    type: int64
+    repeated: false
+    required: false
+  - name: notebook_id
+    description: The notebook to read from (shoud also include cell id)
+    type: string
+    repeated: false
+    required: false
+  - name: notebook_cell_id
+    description: The notebook cell read from (shoud also include notebook id)
+    type: string
+    repeated: false
+    required: false
+  - name: notebook_cell_table
+    description: A notebook cell can have multiple tables.)
+    type: int64
+    repeated: false
+    required: false
+  - name: workers
+    description: Number of workers to spawn.)
+    type: int64
+    repeated: false
+    required: false
+  - name: batch
+    description: Number of rows in each batch.)
+    type: int64
+    repeated: false
+    required: false
+  category: server
 - name: parse_auditd
   description: Parse log files generated by auditd.
   type: Plugin
@@ -1715,6 +2169,36 @@
   - name: accessor
     description: The accessor to use.
     type: string
+    repeated: false
+    required: false
+  category: parsers
+- name: parse_binary
+  description: Parse a binary file into a datastructure using a profile.
+  type: Function
+  args:
+  - name: filename
+    description: Binary file to open.
+    type: string
+    repeated: false
+    required: true
+  - name: accessor
+    description: The accessor to use
+    type: string
+    repeated: false
+    required: false
+  - name: profile
+    description: Profile to use (see https://github.com/Velocidex/vtypes).
+    type: string
+    repeated: false
+    required: false
+  - name: struct
+    description: Name of the struct in the profile to instantiate.
+    type: string
+    repeated: false
+    required: true
+  - name: offset
+    description: Start parsing from this offset
+    type: int64
     repeated: false
     required: false
   category: parsers
@@ -1830,7 +2314,7 @@
   args:
   - name: string
     description: A string to convert to int
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   category: parsers
@@ -1887,7 +2371,7 @@
     type: string
     repeated: false
     required: false
-  category: ""
+  category: parsers
 - name: parse_lines
   description: Parse a file separated into lines.
   type: Plugin
@@ -1946,6 +2430,32 @@
   category: parsers
 - name: parse_ntfs_i30
   description: Scan the $I30 stream from an NTFS MFT entry.
+  type: Plugin
+  args:
+  - name: device
+    description: The device file to open. This may be a full path - we will figure
+      out the device automatically.
+    type: string
+    repeated: false
+    required: true
+  - name: inode
+    description: The MFT entry to parse in inode notation (5-144-1).
+    type: string
+    repeated: false
+    required: false
+  - name: mft
+    description: The MFT entry to parse.
+    type: int64
+    repeated: false
+    required: false
+  - name: mft_offset
+    description: The offset to the MFT entry to parse.
+    type: int64
+    repeated: false
+    required: false
+  category: parsers
+- name: parse_ntfs_ranges
+  description: Show the run ranges for an NTFS stream.
   type: Plugin
   args:
   - name: device
@@ -2075,6 +2585,21 @@
     repeated: false
     required: false
   category: parsers
+- name: parse_recyclebin
+  description: Parses a $I file found in the $Recycle.Bin
+  type: Plugin
+  args:
+  - name: filename
+    description: Files to be parsed.
+    type: string
+    repeated: true
+    required: true
+  - name: accessor
+    description: The accessor to use.
+    type: string
+    repeated: false
+    required: false
+  category: parsers
 - name: parse_string_with_regex
   description: Parse a string with a set of regex and extract fields. Returns a dict
     with fields populated from all regex capture variables.
@@ -2090,6 +2615,21 @@
     type: string
     repeated: true
     required: true
+  category: parsers
+- name: parse_usn
+  description: Parse the USN journal from a device.
+  type: Plugin
+  args:
+  - name: device
+    description: The device file to open.
+    type: string
+    repeated: false
+    required: true
+  - name: start_offset
+    description: The starting offset of the first USN record to parse.
+    type: int64
+    repeated: false
+    required: false
   category: parsers
 - name: parse_xml
   description: |
@@ -2160,20 +2700,20 @@
   args:
   - name: item
     description: The item to path
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   - name: patch
     description: A JSON Patch to apply
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   - name: merge
     description: A merge-patch to apply
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
-  category: ""
+  category: server
 - name: path_join
   description: Build a path by joining all components.
   type: Function
@@ -2184,6 +2724,17 @@
     repeated: true
     required: true
   category: basic
+- name: path_split
+  description: Split a path into components. Note this is more complex than just split()
+    because it takes into account path escaping.
+  type: Function
+  args:
+  - name: path
+    description: Path to split into components.
+    type: string
+    repeated: false
+    required: true
+  category: basic
 - name: plist
   description: Parse plist file
   type: Function
@@ -2192,6 +2743,21 @@
     description: A list of files to parse.
     type: string
     repeated: false
+    required: true
+  - name: accessor
+    description: The accessor to use.
+    type: string
+    repeated: false
+    required: false
+  category: parsers
+- name: plist
+  description: Parses a plist file.
+  type: Plugin
+  args:
+  - name: file
+    description: A list of files to parse.
+    type: string
+    repeated: true
     required: true
   - name: accessor
     description: The accessor to use.
@@ -2246,43 +2812,18 @@
   type: Plugin
   args:
   - name: rules
-    description: Yara rules in the yara DSL.
+    description: Yara rules
     type: string
     repeated: false
     required: true
-  - name: files
-    description: The list of files to scan.
-    type: string
-    repeated: true
-    required: true
-  - name: accessor
-    description: Accessor (e.g. NTFS)
-    type: string
-    repeated: false
-    required: false
-  - name: context
-    description: How many bytes to include around each hit
+  - name: pid
+    description: The pid to scan
     type: int
     repeated: false
-    required: false
-  - name: start
-    description: The start offset to scan
-    type: int64
-    repeated: false
-    required: false
-  - name: end
-    description: End scanning at this offset (100mb)
-    type: int64
-    repeated: false
-    required: false
-  - name: number
-    description: Stop after this many hits (1).
-    type: int64
-    repeated: false
-    required: false
-  - name: blocksize
-    description: Blocksize for scanning (1mb).
-    type: int64
+    required: true
+  - name: context
+    description: Return this many bytes either side of a hit
+    type: int
     repeated: false
     required: false
   - name: key
@@ -2291,6 +2832,56 @@
     repeated: false
     required: false
   category: windows
+- name: profile
+  description: Returns a profile dump from the running process.
+  type: Plugin
+  args:
+  - name: allocs
+    description: A sampling of all past memory allocations
+    type: bool
+    repeated: false
+    required: false
+  - name: block
+    description: Stack traces that led to blocking on synchronization primitives
+    type: bool
+    repeated: false
+    required: false
+  - name: goroutine
+    description: Stack traces of all current goroutines
+    type: bool
+    repeated: false
+    required: false
+  - name: heap
+    description: A sampling of memory allocations of live objects.
+    type: bool
+    repeated: false
+    required: false
+  - name: mutex
+    description: Stack traces of holders of contended mutexes
+    type: bool
+    repeated: false
+    required: false
+  - name: profile
+    description: CPU profile.
+    type: bool
+    repeated: false
+    required: false
+  - name: trace
+    description: CPU trace.
+    type: bool
+    repeated: false
+    required: false
+  - name: debug
+    description: Debug level
+    type: int64
+    repeated: false
+    required: false
+  - name: duration
+    description: Duration of samples (default 30 sec)
+    type: int64
+    repeated: false
+    required: false
+  category: plugins
 - name: pslist
   description: |
     Enumerate running processes.
@@ -2302,7 +2893,8 @@
   type: Plugin
   args:
   - name: pid
-    description: A process ID to list. If not provided list all processes.
+    description: A pid to list. If this is provided we are able to operate much faster
+      by only opening a single process.
     type: int64
     repeated: false
     required: false
@@ -2354,20 +2946,15 @@
   description: Read a file into a string.
   type: Function
   args:
-  - name: chunk
-    description: length of each chunk to read from the file.
-    type: int
-    repeated: false
-    required: false
-  - name: max_length
+  - name: length
     description: Max length of the file to read.
     type: int
     repeated: false
     required: false
-  - name: filenames
+  - name: filename
     description: One or more files to open.
     type: string
-    repeated: true
+    repeated: false
     required: true
   - name: accessor
     description: An accessor to use.
@@ -2471,7 +3058,7 @@
   args:
   - name: query
     description: Source query.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   - name: "n"
@@ -2531,7 +3118,7 @@
   args:
   - name: item
     description: The item to encode
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   - name: format
@@ -2540,26 +3127,48 @@
     repeated: false
     required: false
   category: basic
+- name: server_metadata
+  description: Returns client metadata from the datastore. Client metadata is a set
+    of free form key/value data
+  type: Function
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: server
+- name: server_set_metadata
+  description: Sets client metadata. Client metadata is a set of free form key/value
+    data
+  type: Function
+  args:
+  - name: client_id
+    description: ""
+    type: string
+    repeated: false
+    required: true
+  category: server
 - name: set_client_monitoring
   description: Sets the current client monitoring state.
   type: Function
   args:
   - name: value
     description: The Value to set
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
-  category: ""
+  category: server
 - name: set_server_monitoring
   description: Sets the current server monitoring state.
   type: Function
   args:
   - name: value
     description: The Value to set
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
-  category: ""
+  category: server
 - name: sleep
   description: Sleep for the specified number of seconds. Always returns true.
   type: Function
@@ -2589,21 +3198,6 @@
     type: string
     repeated: false
     required: false
-  - name: day_name
-    description: Only extract this day's Monitoring logs (deprecated)
-    type: string
-    repeated: false
-    required: false
-  - name: start_time
-    description: Start return events from this date (for event sources)
-    type: int64
-    repeated: false
-    required: false
-  - name: end_time
-    description: Stop end events reach this time (event sources).
-    type: int64
-    repeated: false
-    required: false
   - name: flow_id
     description: A flow ID (client or server artifacts)
     type: string
@@ -2624,9 +3218,39 @@
     type: string
     repeated: false
     required: false
-  - name: mode
-    description: HUNT or CLIENT mode can be empty
+  - name: start_time
+    description: Start return events from this date (for event sources)
+    type: int64
+    repeated: false
+    required: false
+  - name: end_time
+    description: Stop end events reach this time (event sources).
+    type: int64
+    repeated: false
+    required: false
+  - name: notebook_id
+    description: The notebook to read from (shoud also include cell id)
     type: string
+    repeated: false
+    required: false
+  - name: notebook_cell_id
+    description: The notebook cell read from (shoud also include notebook id)
+    type: string
+    repeated: false
+    required: false
+  - name: notebook_cell_table
+    description: A notebook cell can have multiple tables.)
+    type: int64
+    repeated: false
+    required: false
+  - name: start_row
+    description: Start reading the result set from this row
+    type: int64
+    repeated: false
+    required: false
+  - name: count
+    description: Maximum number of clients to fetch (default unlimited)'
+    type: int64
     repeated: false
     required: false
   category: server
@@ -2687,7 +3311,7 @@
   args:
   - name: query
     description: Source for rows to upload.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   - name: threads
@@ -2735,7 +3359,7 @@
     type: int64
     repeated: false
     required: false
-  category: ""
+  category: server
 - name: sqlite
   description: Opens an SQLite file and run a query against it.
   type: Plugin
@@ -2757,7 +3381,7 @@
     required: true
   - name: args
     description: ""
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: false
   category: parsers
@@ -2802,7 +3426,7 @@
   args:
   - name: str
     description: The string to normalize
-    type: vfilter.Any
+    type: Any
     repeated: false
     required: true
   category: basic
@@ -2819,7 +3443,7 @@
     description: The prefix to strip
     type: string
     repeated: false
-    required: true
+    required: false
   category: basic
 - name: switch
   description: Executes each query. The first query to return any rows will be emitted.
@@ -2831,22 +3455,12 @@
     query ends.
   type: Function
   args:
-  - name: data
-    description: Data to write in the tempfile.
-    type: string
-    repeated: true
-    required: false
-  - name: extension
-    description: An extension to place in the tempfile.
-    type: string
-    repeated: false
-    required: false
   - name: remove_last
     description: If set we delay removal as much as possible.
     type: bool
     repeated: false
     required: false
-  category: ""
+  category: basic
 - name: tempfile
   description: |
     Create a temporary file and write some data into it.
@@ -2864,6 +3478,11 @@
     type: string
     repeated: false
     required: false
+  - name: permissions
+    description: Required permissions (e.g. 'x').
+    type: string
+    repeated: false
+    required: false
   - name: remove_last
     description: If set we delay removal as much as possible.
     type: bool
@@ -2876,7 +3495,17 @@
   args:
   - name: epoch
     description: ""
-    type: vfilter.Any
+    type: Any
+    repeated: false
+    required: false
+  - name: cocoatime
+    description: ""
+    type: int64
+    repeated: false
+    required: false
+  - name: mactime
+    description: HFS+
+    type: int64
     repeated: false
     required: false
   - name: winfiletime
@@ -2898,8 +3527,13 @@
 - name: to_dict
   description: Construct a dict from another object.
   type: Function
-  args: []
-  category: ""
+  args:
+  - name: item
+    description: ""
+    type: Any
+    repeated: false
+    required: false
+  category: basic
 - name: token
   description: Extract process token.
   type: Function
@@ -3042,7 +3676,62 @@
     type: string
     repeated: false
     required: true
+  - name: endpoint
+    description: The Endpoint to use
+    type: string
+    repeated: false
+    required: false
+  - name: noverifycert
+    description: Skip TLS Verification
+    type: bool
+    repeated: false
+    required: false
   category: plugin
+- name: upload_sftp
+  description: Upload files to SFTP.
+  type: Function
+  args:
+  - name: file
+    description: The file to upload
+    type: string
+    repeated: false
+    required: true
+  - name: name
+    description: The name of the file that should be stored on the server
+    type: string
+    repeated: false
+    required: false
+  - name: user
+    description: The username to connect to the endpoint with
+    type: string
+    repeated: false
+    required: true
+  - name: path
+    description: Path on server to upload file to
+    type: string
+    repeated: false
+    required: true
+  - name: accessor
+    description: The accessor to use
+    type: string
+    repeated: false
+    required: false
+  - name: privatekey
+    description: The private key to use
+    type: string
+    repeated: false
+    required: true
+  - name: endpoint
+    description: The Endpoint to use
+    type: string
+    repeated: false
+    required: true
+  - name: hostkey
+    description: Host key to verify. Blank to disable
+    type: string
+    repeated: false
+    required: false
+  category: basic
 - name: upload_webdav
   description: Upload files to a WebDAV server.
   type: Function
@@ -3077,7 +3766,7 @@
     type: string
     repeated: false
     required: false
-  category: ""
+  category: basic
 - name: uploads
   description: Retrieve information about a flow's uploads.
   type: Plugin
@@ -3171,6 +3860,11 @@
     repeated: false
     required: true
   category: basic
+- name: uuid
+  description: Generate a UUID.
+  type: Function
+  args: []
+  category: basic
 - name: vad
   description: Enumerate process memory regions.
   type: Plugin
@@ -3201,8 +3895,18 @@
       else=LegacyQuery)
     ```
   type: Function
-  args: []
-  category: ""
+  args:
+  - name: function
+    description: ""
+    type: string
+    repeated: false
+    required: false
+  - name: plugin
+    description: ""
+    type: string
+    repeated: false
+    required: false
+  category: basic
 - name: watch_auditd
   description: Watch log files generated by auditd.
   type: Plugin
@@ -3237,6 +3941,16 @@
     type: string
     repeated: false
     required: false
+  category: event
+- name: watch_etw
+  description: Watch for events from an ETW provider.
+  type: Plugin
+  args:
+  - name: guid
+    description: 'A Provider GUID to watch '
+    type: string
+    repeated: false
+    required: true
   category: event
 - name: watch_evtx
   description: |
@@ -3297,6 +4011,16 @@
     type: string
     repeated: false
     required: false
+  category: event
+- name: watch_usn
+  description: Watch the USN journal from a device.
+  type: Plugin
+  args:
+  - name: device
+    description: The device file to open.
+    type: string
+    repeated: false
+    required: true
   category: event
 - name: winobj
   description: Enumerate The Windows Object Manager namespace.
@@ -3369,7 +4093,7 @@
     required: false
   - name: query
     description: query to write into the file.
-    type: vfilter.StoredQuery
+    type: StoredQuery
     repeated: false
     required: true
   category: plugin
@@ -3446,12 +4170,12 @@
     required: false
   - name: start
     description: The start offset to scan
-    type: int64
+    type: uint64
     repeated: false
     required: false
   - name: end
     description: End scanning at this offset (100mb)
-    type: int64
+    type: uint64
     repeated: false
     required: false
   - name: number
@@ -3470,4 +4194,3 @@
     repeated: false
     required: false
   category: plugin
-

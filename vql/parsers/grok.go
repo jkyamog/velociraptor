@@ -2,6 +2,7 @@ package parsers
 
 import (
 	"context"
+	"sort"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/vjeantet/grok"
@@ -17,7 +18,7 @@ type GrokParseFunctionArgs struct {
 
 type GrokParseFunction struct{}
 
-func (self GrokParseFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self GrokParseFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "grok",
 		Doc:     "Parse a string using a Grok expression.",
@@ -26,7 +27,7 @@ func (self GrokParseFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeM
 }
 
 func (self GrokParseFunction) Call(
-	ctx context.Context, scope *vfilter.Scope,
+	ctx context.Context, scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &GrokParseFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -50,7 +51,11 @@ func (self GrokParseFunction) Call(
 			if pres {
 				pattern, ok := v.(string)
 				if ok {
-					grok_parser.AddPattern(k, pattern)
+					err = grok_parser.AddPattern(k, pattern)
+					if err != nil {
+						scope.Log("grok: %v", err)
+						return &vfilter.Null{}
+					}
 				}
 			}
 		}
@@ -64,7 +69,17 @@ func (self GrokParseFunction) Call(
 		return &vfilter.Null{}
 	}
 
-	return result
+	keys := make([]string, 0, len(result))
+	for k := range result {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+	result_dict := ordereddict.NewDict()
+	for _, k := range keys {
+		result_dict.Set(k, result[k])
+	}
+	return result_dict
 }
 
 func init() {

@@ -31,6 +31,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -44,6 +45,11 @@ var (
 		Help: "Total number of Scope objects constructed.",
 	})
 )
+
+func OverridePlugin(plugin vfilter.PluginGeneratorInterface) {
+	name := plugin.Info(nil, nil).Name
+	exportedPlugins[name] = plugin
+}
 
 func RegisterPlugin(plugin vfilter.PluginGeneratorInterface) {
 	name := plugin.Info(nil, nil).Name
@@ -79,10 +85,10 @@ var (
 
 	// Instead of building the scope from scratch each time, use a
 	// global scope and prepare any other scopes from it.
-	globalScope *vfilter.Scope
+	globalScope vfilter.Scope
 )
 
-func _makeRootScope() *vfilter.Scope {
+func _makeRootScope() vfilter.Scope {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -93,13 +99,24 @@ func _makeRootScope() *vfilter.Scope {
 	return globalScope.NewScope()
 }
 
-func MakeScope() *vfilter.Scope {
+func MakeScope() vfilter.Scope {
 	return _makeRootScope()
+}
+
+func GetRootScope(scope vfilter.Scope) vfilter.Scope {
+	root_any, pres := scope.Resolve(constants.SCOPE_ROOT)
+	if pres {
+		root, ok := root_any.(vfilter.Scope)
+		if ok {
+			return root
+		}
+	}
+	return scope
 }
 
 // MakeNewScope makes a new scope from scratch. You do not need to use
 // this! use MakeScope() above which is much faster.
-func MakeNewScope() *vfilter.Scope {
+func MakeNewScope() vfilter.Scope {
 	scopeCounter.Inc()
 
 	result := vfilter.NewScope()

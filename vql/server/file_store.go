@@ -25,7 +25,6 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/directory"
@@ -40,7 +39,7 @@ type DeleteFileStoreArgs struct {
 type DeleteFileStore struct{}
 
 func (self *DeleteFileStore) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &DeleteFileStoreArgs{}
 
@@ -56,7 +55,7 @@ func (self *DeleteFileStore) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	config_obj, ok := artifacts.GetServerConfig(scope)
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
@@ -81,7 +80,7 @@ func (self *DeleteFileStore) Call(ctx context.Context,
 	return arg.VFSPath
 }
 
-func (self DeleteFileStore) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self DeleteFileStore) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "file_store_delete",
 		Doc:     "Delete file store paths into full filesystem paths. ",
@@ -96,7 +95,7 @@ type FileStoreArgs struct {
 type FileStore struct{}
 
 func (self *FileStore) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &FileStoreArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -105,7 +104,7 @@ func (self *FileStore) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	config_obj, ok := artifacts.GetServerConfig(scope)
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
@@ -122,7 +121,7 @@ func (self *FileStore) Call(ctx context.Context,
 	return result
 }
 
-func (self FileStore) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self FileStore) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "file_store",
 		Doc:     "Resolves file store paths into full filesystem paths. ",

@@ -21,35 +21,12 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/Velocidex/ordereddict"
-	"github.com/pkg/errors"
-	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
-	"www.velocidex.com/golang/velociraptor/json"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
 
-func ExtractRows(vql_response *actions_proto.VQLResponse) ([]vfilter.Row, error) {
-	result := []vfilter.Row{}
-	var rows []map[string]interface{}
-	err := json.Unmarshal([]byte(vql_response.Response), &rows)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	for _, row := range rows {
-		item := ordereddict.NewDict()
-		for k, v := range row {
-			item.Set(k, v)
-		}
-		result = append(result, item)
-	}
-
-	return result, nil
-}
-
 // GetStringFromRow gets a string value from row. If it is not there
 // or not a string return ""
-func GetStringFromRow(scope *vfilter.Scope,
+func GetStringFromRow(scope vfilter.Scope,
 	row vfilter.Row, key string) string {
 	value, pres := scope.Associative(row, key)
 	if pres {
@@ -63,7 +40,7 @@ func GetStringFromRow(scope *vfilter.Scope,
 
 // GetIntFromRow gets a uint64 value from row. If it is not there
 // or not a string return 0. Floats etc are coerced to uint64.
-func GetIntFromRow(scope *vfilter.Scope,
+func GetIntFromRow(scope vfilter.Scope,
 	row vfilter.Row, key string) uint64 {
 	value, pres := scope.Associative(row, key)
 	if pres {
@@ -94,7 +71,7 @@ func GetIntFromRow(scope *vfilter.Scope,
 // A writer which periodically reports how much has been
 // written. Useful for tee with another writer.
 type LogWriter struct {
-	Scope   *vfilter.Scope
+	Scope   vfilter.Scope
 	Message string
 	Period  time.Duration
 
@@ -116,7 +93,7 @@ func (self *LogWriter) Write(buff []byte) (int, error) {
 	return len(buff), nil
 }
 
-func CheckForPanic(scope *vfilter.Scope, msg string, vals ...interface{}) {
+func CheckForPanic(scope vfilter.Scope, msg string, vals ...interface{}) {
 	r := recover()
 	if r != nil {
 		scope.Log(msg, vals...)

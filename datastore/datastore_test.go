@@ -2,8 +2,10 @@ package datastore
 
 import (
 	"sort"
+	"testing"
+	"time"
 
-	"github.com/alecthomas/assert"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
@@ -52,33 +54,37 @@ func (self BaseTestSuite) TestListChildren() {
 	err := self.datastore.SetSubject(self.config_obj, urn+"/1", message)
 	assert.NoError(self.T(), err)
 
+	time.Sleep(10 * time.Millisecond)
+
 	err = self.datastore.SetSubject(self.config_obj, urn+"/2", message)
 	assert.NoError(self.T(), err)
 
+	time.Sleep(10 * time.Millisecond)
+
 	err = self.datastore.SetSubject(self.config_obj, urn+"/3", message)
 	assert.NoError(self.T(), err)
+
+	time.Sleep(10 * time.Millisecond)
 
 	children, err := self.datastore.ListChildren(self.config_obj, urn, 0, 100)
 	assert.NoError(self.T(), err)
 
 	// ListChildren gives the full path to all children
 	sort.Strings(children)
-	assert.Equal(self.T(), children, []string{
+	assert.Equal(self.T(), []string{
 		"/a/b/c/1",
 		"/a/b/c/2",
-		"/a/b/c/3"})
+		"/a/b/c/3"}, children)
 
 	children, err = self.datastore.ListChildren(self.config_obj, urn, 0, 2)
 	assert.NoError(self.T(), err)
 
-	assert.Equal(self.T(), children, []string{
-		"/a/b/c/1", "/a/b/c/2"})
+	assert.Equal(self.T(), []string{"/a/b/c/1", "/a/b/c/2"}, children)
 
 	children, err = self.datastore.ListChildren(self.config_obj, urn, 1, 2)
 	assert.NoError(self.T(), err)
 
-	assert.Equal(self.T(), children, []string{
-		"/a/b/c/2", "/a/b/c/3"})
+	assert.Equal(self.T(), []string{"/a/b/c/2", "/a/b/c/3"}, children)
 
 	visited := []string{}
 	self.datastore.Walk(self.config_obj, "/\"a\"/b",
@@ -87,8 +93,7 @@ func (self BaseTestSuite) TestListChildren() {
 			return nil
 		})
 
-	assert.Equal(self.T(), visited, []string{
-		"/a/b/c/1", "/a/b/c/2", "/a/b/c/3"})
+	assert.Equal(self.T(), []string{"/a/b/c/1", "/a/b/c/2", "/a/b/c/3"}, visited)
 }
 
 func (self BaseTestSuite) TestIndexes() {
@@ -102,11 +107,17 @@ func (self BaseTestSuite) TestIndexes() {
 	assert.NoError(self.T(), err)
 
 	hits := self.datastore.SearchClients(self.config_obj, constants.CLIENT_INDEX_URN,
-		"all", "", 0, 100)
+		"all", "", 0, 100, SORT_UP)
 	sort.Strings(hits)
 	assert.Equal(self.T(), []string{client_id, client_id_2}, hits)
 
 	hits = self.datastore.SearchClients(self.config_obj, constants.CLIENT_INDEX_URN,
-		"*foo", "", 0, 100)
+		"*foo", "", 0, 100, SORT_UP)
 	assert.Equal(self.T(), []string{client_id}, hits)
+}
+
+func benchmarkSearchClient(b *testing.B,
+	data_store DataStore,
+	config_obj *config_proto.Config) {
+
 }

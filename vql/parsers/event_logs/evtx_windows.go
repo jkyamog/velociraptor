@@ -23,11 +23,12 @@ func (self cachedMessageSet) Size() int {
 // maybeEnrichEvent searches for the event messages in the system's
 // event providers.
 func maybeEnrichEvent(event *ordereddict.Dict) *ordereddict.Dict {
-	// Event.System.Provider.Name
-	provider, ok := ordereddict.GetString(event, "System.Provider.Name")
-	if !ok {
-		return event
-	}
+	// Event.System.Provider.Name and Event.System.Provider.Guid
+	// are alternate ways of specifying the provider. Some
+	// providers have either one or both so we allow either one to
+	// be blank here.
+	provider, _ := ordereddict.GetString(event, "System.Provider.Name")
+	provider_guid, _ := ordereddict.GetString(event, "System.Provider.Guid")
 
 	channel, ok := ordereddict.GetString(event, "System.Channel")
 	if !ok {
@@ -39,15 +40,18 @@ func maybeEnrichEvent(event *ordereddict.Dict) *ordereddict.Dict {
 		return event
 	}
 
-	key := channel + provider
+	key := channel + provider + provider_guid
 	var message_set *evtx.MessageSet
 	var err error
 
 	cached_message_set, pres := lru.Get(key)
 	if !pres {
-		message_set, err = evtx.GetMessages(provider, channel)
+		message_set, err = evtx.GetMessagesByGUID(provider_guid, channel)
 		if err != nil {
-			return event
+			message_set, err = evtx.GetMessages(provider, channel)
+			if err != nil {
+				return event
+			}
 		}
 
 		lru.Set(key, cachedMessageSet{message_set})

@@ -1,5 +1,3 @@
-// +build server_vql
-
 package tools
 
 import (
@@ -9,12 +7,11 @@ import (
 	"io"
 
 	"github.com/Velocidex/ordereddict"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/reporting"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	"www.velocidex.com/golang/velociraptor/vql/server"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -23,8 +20,10 @@ type ReportPart struct {
 	HTML     string
 }
 
-func getHTMLTemplate(name string, repository *artifacts.Repository) (string, error) {
-	template_artifact, ok := repository.Get(name)
+func getHTMLTemplate(
+	config_obj *config_proto.Config,
+	name string, repository services.Repository) (string, error) {
+	template_artifact, ok := repository.Get(config_obj, name)
 	if !ok || len(template_artifact.Reports) == 0 {
 		return "", errors.New("Not found")
 	}
@@ -40,27 +39,32 @@ func getHTMLTemplate(name string, repository *artifacts.Repository) (string, err
 // Produce a collector report.
 func produceReport(
 	config_obj *config_proto.Config,
-	container *reporting.Container,
+	archive *reporting.Archive,
 	template string,
-	repository *artifacts.Repository,
+	repository services.Repository,
 	writer io.Writer,
 	definitions []*artifacts_proto.Artifact,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	arg *CollectPluginArgs) error {
 
-	builder := artifacts.ScopeBuilderFromScope(scope)
+	builder := services.ScopeBuilderFromScope(scope)
+	builder.Repository = repository
 	builder.Uploader = nil
 
 	// Build scope from scratch and replace the source()
 	// plugin. We hook the source plugin to read results from the
 	// collection container.
-	subscope := builder.BuildFromScratch()
+	manager, err := services.GetRepositoryManager()
+	if err != nil {
+		return err
+	}
+	subscope := manager.BuildScopeFromScratch(builder)
 	defer subscope.Close()
 
 	// Reports can query the container directly.
-	subscope.AppendPlugins(&ContainerSourcePlugin{Container: container})
+	subscope.AppendPlugins(&ArchiveSourcePlugin{Archive: archive})
 
-	html_template_string, err := getHTMLTemplate(template, repository)
+	html_template_string, err := getHTMLTemplate(config_obj, template, repository)
 	if err != nil {
 		return err
 	}
@@ -122,17 +126,18 @@ func produceReport(
 	return err
 }
 
-// A special implementation of the source() plugin which retrieves
-// data stored in reporting containers. This only exists in generating
-// reports from zip files.
-type ContainerSourcePlugin struct {
-	server.SourcePlugin
-	Container *reporting.Container
+type SourcePluginArgs struct {
+	Artifact string `vfilter:"optional,field=artifact,doc=The name of the artifact collection to fetch"`
+	Source   string `vfilter:"optional,field=source,doc=An optional named source within the artifact"`
 }
 
-func (self *ContainerSourcePlugin) Call(
+type ArchiveSourcePlugin struct {
+	Archive *reporting.Archive
+}
+
+func (self *ArchiveSourcePlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -143,8 +148,8 @@ func (self *ContainerSourcePlugin) Call(
 		// parameters. This allows its use to be more concise in
 		// reports etc where many parameters can be inferred from
 		// context.
-		arg := &server.SourcePluginArgs{}
-		server.ParseSourceArgsFromScope(arg, scope)
+		arg := &SourcePluginArgs{}
+		ParseSourceArgsFromScope(arg, scope)
 
 		// Allow the plugin args to override the environment scope.
 		err := vfilter.ExtractArgs(scope, args, arg)
@@ -158,10 +163,30 @@ func (self *ContainerSourcePlugin) Call(
 			arg.Source = ""
 		}
 
-		for row := range self.Container.ReadArtifactResults(ctx, scope, arg.Artifact) {
-			output_chan <- row
+		for row := range self.Archive.ReadArtifactResults(ctx, scope, arg.Artifact) {
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- row:
+			}
 		}
 	}()
 
 	return output_chan
+}
+
+func (self ArchiveSourcePlugin) Info(
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+	return &vfilter.PluginInfo{
+		Name:    "source",
+		Doc:     "Retrieve rows from stored result sets. This is a one stop show for retrieving stored result set for post processing.",
+		ArgType: type_map.AddType(scope, &SourcePluginArgs{}),
+	}
+}
+
+func ParseSourceArgsFromScope(arg *SourcePluginArgs, scope vfilter.Scope) {
+	artifact_name, pres := scope.Resolve("ArtifactName")
+	if pres {
+		arg.Artifact = artifact_name.(string)
+	}
 }

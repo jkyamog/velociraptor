@@ -31,12 +31,12 @@ import (
 
 type DataFilesystemAccessor struct{}
 
-func (self DataFilesystemAccessor) New(scope *vfilter.Scope) (FileSystemAccessor, error) {
+func (self DataFilesystemAccessor) New(scope vfilter.Scope) (FileSystemAccessor, error) {
 	return DataFilesystemAccessor{}, nil
 }
 
 func (self DataFilesystemAccessor) Lstat(filename string) (FileInfo, error) {
-	return nil, errors.New("Not implemented")
+	return utils.NewDataFileInfo(filename), nil
 }
 
 func (self DataFilesystemAccessor) ReadDir(path string) ([]FileInfo, error) {
@@ -44,7 +44,10 @@ func (self DataFilesystemAccessor) ReadDir(path string) ([]FileInfo, error) {
 }
 
 func (self DataFilesystemAccessor) Open(path string) (ReadSeekCloser, error) {
-	return utils.DataReadSeekCloser{strings.NewReader(path)}, nil
+	return utils.DataReadSeekCloser{
+		ReadSeeker: strings.NewReader(path),
+		Data:       path,
+	}, nil
 }
 
 func (self DataFilesystemAccessor) PathSplit(path string) []string {

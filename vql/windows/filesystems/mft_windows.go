@@ -30,6 +30,7 @@ import (
 
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/vql/windows/filesystems/readers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -37,7 +38,7 @@ type MFTFileSystemAccessor struct {
 	*NTFSFileSystemAccessor
 }
 
-func (self MFTFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+func (self MFTFileSystemAccessor) New(scope vfilter.Scope) (glob.FileSystemAccessor, error) {
 	ntfs_accessor, err := NTFSFileSystemAccessor{}.New(scope)
 	if err != nil {
 		return nil, err
@@ -62,12 +63,10 @@ func (self *MFTFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error
 		return nil, err
 	}
 
-	accessor_ctx, err := self.getNTFSContext(device)
+	ntfs_ctx, err := readers.GetNTFSContext(self.scope, device)
 	if err != nil {
 		return nil, err
 	}
-
-	ntfs_ctx := accessor_ctx.ntfs_ctx
 
 	mft_entry, err := ntfs_ctx.GetMFT(mft_idx)
 	if err != nil {
@@ -120,12 +119,11 @@ func (self *MFTFileSystemAccessor) Lstat(path string) (glob.FileInfo, error) {
 		return nil, err
 	}
 
-	accessor_ctx, err := self.getNTFSContext(device)
+	ntfs_ctx, err := readers.GetNTFSContext(self.scope, device)
 	if err != nil {
 		return nil, err
 	}
 
-	ntfs_ctx := accessor_ctx.ntfs_ctx
 	mft_entry, err := ntfs_ctx.GetMFT(mft_idx)
 	if err != nil {
 		return nil, err

@@ -142,10 +142,6 @@ func (self *Win32_Process) getUsername(handle syscall.Handle) {
 	defer token.Close()
 
 	tokenUser, err := token.GetTokenUser()
-	if err != nil {
-		return
-	}
-
 	self.OwnerSid, _ = tokenUser.User.Sid.String()
 
 	user, domain, _, err := tokenUser.User.Sid.LookupAccount("")
@@ -164,7 +160,7 @@ type PslistPlugin struct{}
 
 func (self PslistPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &PslistArgs{}
@@ -227,8 +223,11 @@ func (self PslistPlugin) Call(
 					// Close the handle now.
 					syscall.Close(proc_handle)
 				}
-
-				output_chan <- info
+				select {
+				case <-ctx.Done():
+					return
+				case output_chan <- info:
+				}
 			}
 			err = windows.Process32Next(handle, &entry)
 			if err == syscall.ERROR_NO_MORE_FILES {
@@ -244,7 +243,7 @@ func (self PslistPlugin) Call(
 	return output_chan
 }
 
-func (self PslistPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self PslistPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "pslist",
 		Doc:     "Enumerate running processes.",

@@ -24,6 +24,7 @@ var (
 
 type MemoryReader struct {
 	*bytes.Reader
+	filename string
 }
 
 func (self MemoryReader) Close() error {
@@ -31,7 +32,11 @@ func (self MemoryReader) Close() error {
 }
 
 func (self MemoryReader) Stat() (glob.FileInfo, error) {
-	return nil, errors.New("Not Implemented")
+	return vtesting.MockFileInfo{
+		Name_:     self.filename,
+		FullPath_: self.filename,
+		Size_:     int64(self.Reader.Len()),
+	}, nil
 }
 
 type MemoryWriter struct {
@@ -43,6 +48,7 @@ type MemoryWriter struct {
 func (self *MemoryWriter) Size() (int64, error) {
 	return int64(len(self.buf)), nil
 }
+
 func (self *MemoryWriter) Write(data []byte) (int, error) {
 	self.buf = append(self.buf, data...)
 	return len(data), nil
@@ -83,7 +89,10 @@ func (self *MemoryFileStore) ReadFile(filename string) (api.FileReader, error) {
 
 	data, pres := self.Data[filename]
 	if pres {
-		return MemoryReader{bytes.NewReader(data)}, nil
+		return MemoryReader{
+			Reader:   bytes.NewReader(data),
+			filename: filename,
+		}, nil
 	}
 
 	return nil, errors.New("Not found")
@@ -107,7 +116,10 @@ func (self *MemoryFileStore) WriteFile(filename string) (api.FileWriter, error) 
 }
 
 func (self *MemoryFileStore) StatFile(filename string) (os.FileInfo, error) {
-	_, pres := self.Data[filename]
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	buff, pres := self.Data[filename]
 	if !pres {
 		return nil, os.ErrNotExist
 	}
@@ -115,6 +127,7 @@ func (self *MemoryFileStore) StatFile(filename string) (os.FileInfo, error) {
 	return &vtesting.MockFileInfo{
 		Name_:     path.Base(filename),
 		FullPath_: filename,
+		Size_:     int64(len(buff)),
 	}, nil
 }
 
@@ -144,8 +157,26 @@ func (self *MemoryFileStore) ListDirectory(dirname string) ([]os.FileInfo, error
 	return result, nil
 }
 
-func (self *MemoryFileStore) Walk(root string, cb filepath.WalkFunc) error {
-	return errors.New("Not implemented")
+func (self *MemoryFileStore) Walk(root string, walkFn filepath.WalkFunc) error {
+	children, err := self.ListDirectory(root)
+	if err != nil {
+		return err
+	}
+
+	for _, child_info := range children {
+		full_path := path.Join(root, child_info.Name())
+		err1 := walkFn(full_path, child_info, err)
+		if err1 == filepath.SkipDir {
+			continue
+		}
+
+		err1 = self.Walk(full_path, walkFn)
+		if err1 != nil {
+			return err1
+		}
+	}
+
+	return nil
 }
 
 func (self *MemoryFileStore) Delete(filename string) error {

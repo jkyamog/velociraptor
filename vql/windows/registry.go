@@ -40,7 +40,7 @@ type _ExpandPath struct{}
 
 func (self _ExpandPath) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
@@ -58,7 +58,7 @@ func (self _ExpandPath) Call(
 
 	// Support both go style expandsions and windows style
 	// expansions.
-	path := os.ExpandEnv(arg.Path)
+	path := os.Expand(arg.Path, getenv)
 	expanded_path, err := registry.ExpandString(path)
 	if err != nil {
 		scope.Log("expand: %v", err)
@@ -68,7 +68,15 @@ func (self _ExpandPath) Call(
 	return expanded_path
 }
 
-func (self _ExpandPath) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func getenv(v string) string {
+	// Allow $ to be escaped (#850) by doubling up $
+	if v == "$" {
+		return "$"
+	}
+	return os.Getenv(v)
+}
+
+func (self _ExpandPath) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "expand",
 		Doc:     "Expand the path using the environment.",

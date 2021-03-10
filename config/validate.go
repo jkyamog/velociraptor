@@ -30,8 +30,9 @@ func ValidateClientConfig(config_obj *config_proto.Config) error {
 		return errors.New("No Client.server_urls configured")
 	}
 
-	if WritebackLocation(config_obj) == "" {
-		return errors.New("No writeback location specified.")
+	_, err := WritebackLocation(config_obj)
+	if err != nil {
+		return err
 	}
 
 	// Add defaults
@@ -109,8 +110,20 @@ func ValidateFrontendConfig(config_obj *config_proto.Config) error {
 	}
 
 	// Fill defaults for optional sections
-	if config_obj.Frontend.ExpectedClients == 0 {
-		config_obj.Frontend.ExpectedClients = 10000
+	if config_obj.Frontend.Resources != nil {
+		resources := config_obj.Frontend.Resources
+
+		if resources.ExpectedClients == 0 {
+			resources.ExpectedClients = 10000
+		}
+
+		if resources.ConnectionsPerSecond == 0 {
+			resources.ConnectionsPerSecond = 100
+		}
+
+		if resources.ConnectionsPerSecond > 1000 {
+			resources.ConnectionsPerSecond = 1000
+		}
 	}
 
 	if config_obj.API.PinnedGwName == "" {

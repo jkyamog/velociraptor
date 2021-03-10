@@ -26,11 +26,12 @@ import (
 	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 type ArrayFunction struct{}
 
-func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any, depth int) []vfilter.Any {
+func flatten(ctx context.Context, scope vfilter.Scope, a vfilter.Any, depth int) []vfilter.Any {
 	var result []vfilter.Any
 
 	if depth > 4 {
@@ -38,10 +39,10 @@ func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any, depth int
 	}
 
 	switch t := a.(type) {
-	case vfilter.LazyExpr:
+	case types.LazyExpr:
 		a = t.Reduce()
 
-	case vfilter.StoredQuery:
+	case types.StoredQuery:
 		for row := range t.Eval(ctx, scope) {
 			// Special case a single column means the
 			// value is taken directly.
@@ -85,12 +86,12 @@ func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any, depth int
 }
 
 func (self *ArrayFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	return flatten(ctx, scope, args, 0)
 }
 
-func (self ArrayFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self ArrayFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name: "array",
 		Doc:  "Create an array with all the args.",
@@ -105,7 +106,7 @@ type JoinFunctionArgs struct {
 type JoinFunction struct{}
 
 func (self *JoinFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &JoinFunctionArgs{}
@@ -122,7 +123,7 @@ func (self *JoinFunction) Call(ctx context.Context,
 	return strings.Join(arg.Array, arg.Sep)
 }
 
-func (self JoinFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self JoinFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "join",
 		Doc:     "Join all the args on a separator.",
@@ -131,13 +132,13 @@ func (self JoinFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *
 }
 
 type FilterFunctionArgs struct {
-	List  []string `vfilter:"required,field=list,doc=A list of items too filter"`
+	List  []string `vfilter:"required,field=list,doc=A list of items to filter"`
 	Regex []string `vfilter:"required,field=regex,doc=A regex to test each item"`
 }
 type FilterFunction struct{}
 
 func (self *FilterFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &FilterFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -168,7 +169,7 @@ func (self *FilterFunction) Call(ctx context.Context,
 	return result
 }
 
-func (self FilterFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self FilterFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "filter",
 		Doc:     "Filters a strings array by regex.",
@@ -182,7 +183,7 @@ type LenFunctionArgs struct {
 type LenFunction struct{}
 
 func (self *LenFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &LenFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -209,7 +210,7 @@ func (self *LenFunction) Call(ctx context.Context,
 	return 0
 }
 
-func (self LenFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self LenFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "len",
 		Doc:     "Returns the length of an object.",
@@ -217,7 +218,78 @@ func (self LenFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *v
 	}
 }
 
+type SliceFunctionArgs struct {
+	List  vfilter.Any `vfilter:"required,field=list,doc=A list of items to slice"`
+	Start uint64      `vfilter:"required,field=start,doc=Start index (0 based)"`
+	End   uint64      `vfilter:"required,field=end,doc=End index (0 based)"`
+}
+type SliceFunction struct{}
+
+func (self *SliceFunction) Call(ctx context.Context,
+	scope vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+	arg := &SliceFunctionArgs{}
+	err := vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("len: %s", err.Error())
+		return &vfilter.Null{}
+	}
+
+	slice := reflect.ValueOf(arg.List)
+	// A slice of strings. Only the following are supported
+	// https://golang.org/pkg/reflect/#Value.Len
+	if slice.Type().Kind() == reflect.Slice ||
+		slice.Type().Kind() == reflect.Map ||
+		slice.Type().Kind() == reflect.Array ||
+		slice.Type().Kind() == reflect.String {
+
+		if arg.End > uint64(slice.Len()) {
+			arg.End = uint64(slice.Len())
+		}
+
+		if arg.Start > arg.End {
+			arg.Start = arg.End
+		}
+
+		result := make([]interface{}, 0, arg.End-arg.Start)
+		for i := arg.Start; i < arg.End; i++ {
+			result = append(result, slice.Index(int(i)).Interface())
+		}
+
+		return result
+	}
+
+	dict, ok := arg.List.(*ordereddict.Dict)
+	if ok {
+		keys := dict.Keys()
+		if arg.End > uint64(len(keys)) {
+			arg.End = uint64(len(keys))
+		}
+
+		if arg.Start > arg.End {
+			arg.Start = arg.End
+		}
+
+		result := make([]interface{}, 0, arg.End-arg.Start)
+		for i := arg.Start; i < arg.End; i++ {
+			result = append(result, keys[int(i)])
+		}
+		return result
+	}
+
+	return []vfilter.Any{}
+}
+
+func (self SliceFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "slice",
+		Doc:     "Slice an array.",
+		ArgType: type_map.AddType(scope, &SliceFunctionArgs{}),
+	}
+}
+
 func init() {
+	vql_subsystem.RegisterFunction(&SliceFunction{})
 	vql_subsystem.RegisterFunction(&FilterFunction{})
 	vql_subsystem.RegisterFunction(&ArrayFunction{})
 	vql_subsystem.RegisterFunction(&JoinFunction{})

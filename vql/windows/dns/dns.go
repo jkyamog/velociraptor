@@ -69,7 +69,7 @@ func inet_ntoa(ip [4]byte) string {
 
 type eventContext struct {
 	output chan vfilter.Row
-	scope  *vfilter.Scope
+	scope  vfilter.Scope
 }
 
 func (self *eventContext) ProcessEvent(packet []byte) {
@@ -170,7 +170,7 @@ type DNSEventPlugin struct{}
 
 func (self DNSEventPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &DNSEventPluginArgs{}
@@ -206,10 +206,16 @@ func (self DNSEventPlugin) Call(
 		// When the scope is destroyed we want to quit reading
 		// from the DNS generator immediately.
 		sub_ctx, cancel := context.WithCancel(ctx)
-		scope.AddDestructor(func() {
+		dest := func() {
 			C.destroyDNS(c_ctx)
 			cancel()
-		})
+		}
+		err = scope.AddDestructor(dest)
+		if err != nil {
+			dest()
+			scope.Log("dns: %s", err.Error())
+			return
+		}
 
 		// Run concurrently.
 		go func() {
@@ -221,7 +227,7 @@ func (self DNSEventPlugin) Call(
 			defer close(event_context.output)
 		}()
 
-		for {
+		for item := range event_context.output {
 			select {
 			case <-sub_ctx.Done():
 				return
@@ -229,11 +235,8 @@ func (self DNSEventPlugin) Call(
 				// Read the next item from the event
 				// queue and send it to the VQL
 				// subsystem.
-			case item, ok := <-event_context.output:
-				if !ok {
-					return
-				}
-				output_chan <- item
+
+			case output_chan <- item:
 			}
 		}
 	}()
@@ -242,7 +245,7 @@ func (self DNSEventPlugin) Call(
 }
 
 func (self DNSEventPlugin) Info(
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "dns",

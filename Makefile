@@ -4,11 +4,11 @@ all:
 auto:
 	go run make.go -v auto
 
-test: golden
-	go test ./...
+test:
+	go test ./... --tags server_vql
 
 golden:
-	./output/velociraptor -v --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd`
+	./output/velociraptor -v --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --filter=
 
 references:
 	./output/velociraptor vql export docs/references/vql.yaml > docs/references/vql.yaml.tmp
@@ -16,6 +16,10 @@ references:
 
 release:
 	go run make.go -v release
+
+# Basic darwin binary - no yara.
+darwin:
+	go run make.go -v DarwinBase
 
 linux:
 	go run make.go -v linux
@@ -49,3 +53,6 @@ debug:
 
 debug_client:
 	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- client -v
+
+lint:
+	golangci-lint run

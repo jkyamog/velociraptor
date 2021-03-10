@@ -1,6 +1,8 @@
 package reporting
 
 import (
+	"io"
+	"regexp"
 	"sort"
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -11,9 +13,17 @@ import (
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
+var (
+	nonIndexingRegex = regexp.MustCompile(`^N\.[FH]\.`)
+)
+
 func CheckNotebookAccess(
 	notebook *api_proto.NotebookMetadata,
 	user string) bool {
+	if notebook.Public {
+		return true
+	}
+
 	return notebook.Creator == user || utils.InString(notebook.Collaborators, user)
 }
 
@@ -34,7 +44,8 @@ func GetSharedNotebooks(
 	// Return all the notebooks from the index that potentially
 	// could be shared with the user.
 	for idx, notebook_id := range db.SearchClients(
-		config_obj, constants.NOTEBOOK_INDEX, user, "", offset, count) {
+		config_obj, constants.NOTEBOOK_INDEX, user, "",
+		offset, count, datastore.SORT_UP) {
 		if uint64(idx) < offset {
 			continue
 		}
@@ -46,10 +57,14 @@ func GetSharedNotebooks(
 		notebook_path_manager := NewNotebookPathManager(notebook_id)
 		notebook := &api_proto.NotebookMetadata{}
 		err := db.GetSubject(config_obj, notebook_path_manager.Path(), notebook)
+		// Notebook was removed or does not exist.
+		if err == io.EOF {
+			continue
+		}
 		if err != nil {
 			logging.GetLogger(
 				config_obj, &logging.FrontendComponent).
-				Error("Unable to open notebook", err)
+				Error("Unable to open notebook: %v", err)
 			continue
 		}
 
@@ -101,6 +116,13 @@ func GetAllNotebooks(
 func UpdateShareIndex(
 	config_obj *config_proto.Config,
 	notebook *api_proto.NotebookMetadata) error {
+
+	// Flow notebooks and hunt notebooks are not indexable by the
+	// general purpose notebook index because we can easily locate
+	// them using the hunt id or the flow id.
+	if nonIndexingRegex.MatchString(notebook.NotebookId) {
+		return nil
+	}
 
 	db, err := datastore.GetDB(config_obj)
 	if err != nil {

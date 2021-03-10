@@ -1,7 +1,6 @@
 package vql
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/sirupsen/logrus"
@@ -37,6 +36,7 @@ type ServerACLManager struct {
 	Token     *acl_proto.ApiClientACL
 }
 
+// Token must have *ALL* the specified permissions.
 func (self *ServerACLManager) CheckAccess(
 	permissions ...acls.ACL_PERMISSION) (bool, error) {
 	for _, permission := range permissions {
@@ -54,7 +54,10 @@ func (self *ServerACLManager) CheckAccess(
 // internally.
 func NewRoleACLManager(role string) ACLManager {
 	policy := &acl_proto.ApiClientACL{}
-	acls.GetRolePermissions(nil, []string{role}, policy)
+
+	// If we fail just return an empty policy
+	_ = acls.GetRolePermissions(nil, []string{role}, policy)
+
 	return &ServerACLManager{Token: policy}
 }
 
@@ -80,26 +83,26 @@ func NewServerACLManager(
 // from within VQL so this is a safe assumption - if a user was to
 // override the ACL_MANAGER_VAR with something else this will lock
 // down the entire VQL ACL system and deny all permissions.
-func CheckAccess(scope *vfilter.Scope, permissions ...acls.ACL_PERMISSION) error {
+func CheckAccess(scope vfilter.Scope, permissions ...acls.ACL_PERMISSION) error {
 	manager_any, pres := scope.Resolve(ACL_MANAGER_VAR)
 	if !pres {
-		return errors.New(fmt.Sprintf("Permission denied: %v", permissions))
+		return fmt.Errorf("Permission denied: %v", permissions)
 	}
 
 	manager, ok := manager_any.(ACLManager)
 	if !ok {
-		return errors.New(fmt.Sprintf("Permission denied: %v", permissions))
+		return fmt.Errorf("Permission denied: %v", permissions)
 	}
 
 	perm, err := manager.CheckAccess(permissions...)
 	if !perm || err != nil {
-		return errors.New(fmt.Sprintf("Permission denied: %v", permissions))
+		return fmt.Errorf("Permission denied: %v", permissions)
 	}
 
 	return nil
 }
 
-func CheckFilesystemAccess(scope *vfilter.Scope, accessor string) error {
+func CheckFilesystemAccess(scope vfilter.Scope, accessor string) error {
 	switch accessor {
 
 	// These accessor are OK to use at any time.
@@ -117,7 +120,7 @@ func CheckFilesystemAccess(scope *vfilter.Scope, accessor string) error {
 }
 
 // Get the principal that is running the query if possible.
-func GetPrincipal(scope *vfilter.Scope) string {
+func GetPrincipal(scope vfilter.Scope) string {
 	manager_any, pres := scope.Resolve(ACL_MANAGER_VAR)
 	if !pres {
 		return ""

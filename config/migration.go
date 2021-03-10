@@ -15,7 +15,7 @@ func deprecated(config_obj *config_proto.Config, name string) {
 
 // Migrate from pre 0.4.2 config files.
 func migrate_0_4_2(config_obj *config_proto.Config) {
-	if config_obj.AutocertDomain != "" {
+	if config_obj.Frontend != nil && config_obj.AutocertDomain != "" {
 		deprecated(config_obj, "autocert_domain")
 		config_obj.Frontend.Hostname = config_obj.AutocertDomain
 		config_obj.AutocertDomain = ""
@@ -64,7 +64,7 @@ func migrate_0_4_2(config_obj *config_proto.Config) {
 		}
 		if config_obj.ObfuscationNonce == "" {
 			sha_sum := sha256.New()
-			sha_sum.Write([]byte(config_obj.Frontend.PrivateKey))
+			_, _ = sha_sum.Write([]byte(config_obj.Frontend.PrivateKey))
 			config_obj.ObfuscationNonce = hex.EncodeToString(sha_sum.Sum(nil))
 		}
 	}
@@ -114,7 +114,42 @@ func migrate_0_4_6(config_obj *config_proto.Config) {
 	}
 }
 
+func migrate_0_5_6(config_obj *config_proto.Config) {
+	if config_obj.Logging != nil {
+		default_rotator := &config_proto.LoggingRetentionConfig{
+			RotationTime: config_obj.Logging.RotationTime,
+			MaxAge:       config_obj.Logging.MaxAge,
+		}
+
+		if config_obj.Logging.Debug == nil {
+			config_obj.Logging.Debug = default_rotator
+		}
+
+		if config_obj.Logging.Info == nil {
+			config_obj.Logging.Debug = default_rotator
+		}
+
+		if config_obj.Logging.Error == nil {
+			config_obj.Logging.Debug = default_rotator
+		}
+	}
+
+	if config_obj.Frontend != nil {
+		if config_obj.Frontend.Resources == nil {
+			config_obj.Frontend.Resources = &config_proto.FrontendResourceControl{
+				Concurrency:         config_obj.Frontend.Concurrency,
+				MaxUploadSize:       config_obj.Frontend.MaxUploadSize,
+				ExpectedClients:     config_obj.Frontend.ExpectedClients,
+				PerClientUploadRate: config_obj.Frontend.PerClientUploadRate,
+				GlobalUploadRate:    config_obj.Frontend.GlobalUploadRate,
+				ClientEventMaxWait:  config_obj.Frontend.ClientEventMaxWait,
+			}
+		}
+	}
+}
+
 func migrate(config_obj *config_proto.Config) {
 	migrate_0_4_2(config_obj)
 	migrate_0_4_6(config_obj)
+	migrate_0_5_6(config_obj)
 }

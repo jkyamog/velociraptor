@@ -25,25 +25,30 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
-	"www.velocidex.com/golang/velociraptor/api"
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/tools"
 	"www.velocidex.com/golang/vfilter"
 )
 
 type ScheduleCollectionFunctionArg struct {
-	ClientId  string      `vfilter:"required,field=client_id,doc=The client id to schedule a collection on"`
-	Artifacts []string    `vfilter:"required,field=artifacts,doc=A list of artifacts to collect"`
-	Env       vfilter.Any `vfilter:"optional,field=env,doc=Parameters to apply to the artifacts"`
+	ClientId     string      `vfilter:"required,field=client_id,doc=The client id to schedule a collection on"`
+	Artifacts    []string    `vfilter:"required,field=artifacts,doc=A list of artifacts to collect"`
+	Env          vfilter.Any `vfilter:"optional,field=env,doc=Parameters to apply to the artifact (an alternative to a full spec)"`
+	Spec         vfilter.Any `vfilter:"optional,field=spec,doc=Parameters to apply to the artifacts"`
+	Timeout      uint64      `vfilter:"optional,field=timeout,doc=Set query timeout (default 10 min)"`
+	OpsPerSecond float64     `vfilter:"optional,field=ops_per_sec,doc=Set query ops_per_sec value"`
+	MaxRows      uint64      `vfilter:"optional,field=max_rows,doc=Max number of rows to fetch"`
+	MaxBytes     uint64      `vfilter:"optional,field=max_bytes,doc=Max number of bytes to upload"`
 }
 
 type ScheduleCollectionFunction struct{}
 
 func (self *ScheduleCollectionFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &ScheduleCollectionFunctionArg{}
@@ -53,9 +58,14 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
+	if len(arg.Artifacts) == 0 {
+		scope.Log("collect_client: no artifacts to collect!")
+		return vfilter.Null{}
+	}
+
 	// Scheduling artifacts on the server requires higher
 	// permissions.
-	permission := acls.COLLECT_CLIENT
+	var permission acls.ACL_PERMISSION
 	if arg.ClientId == "server" {
 		permission = acls.SERVER_ADMIN
 	} else if strings.HasPrefix(arg.ClientId, "C.") {
@@ -71,61 +81,84 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	config_obj, ok := artifacts.GetServerConfig(scope)
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
 	}
 
-	request := api.MakeCollectorRequest(arg.ClientId, "")
-	request.Artifacts = arg.Artifacts
-	request.Creator = vql_subsystem.GetPrincipal(scope)
-
-	for _, k := range scope.GetMembers(arg.Env) {
-		value, pres := scope.Associative(arg.Env, k)
-		if pres {
-			value_str, ok := value.(string)
-			if !ok {
-				scope.Log("collect_client: Env must be a dict of strings")
-				return vfilter.Null{}
-			}
-
-			request.Parameters.Env = append(
-				request.Parameters.Env,
-				&actions_proto.VQLEnv{
-					Key: k, Value: value_str,
-				})
-		}
-	}
-
-	principal := vql_subsystem.GetPrincipal(scope)
-	result := &flows_proto.ArtifactCollectorResponse{Request: request}
-
-	repository, err := artifacts.GetGlobalRepository(config_obj)
+	manager, err := services.GetRepositoryManager()
 	if err != nil {
-		scope.Log("collect_client: %v", err)
+		scope.Log("Command can only run on the server")
+		return vfilter.Null{}
+	}
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
 	}
 
-	flow_id, err := services.ScheduleArtifactCollection(
-		ctx, config_obj, principal, repository, request)
+	request := &flows_proto.ArtifactCollectorArgs{
+		ClientId:       arg.ClientId,
+		Artifacts:      arg.Artifacts,
+		Creator:        vql_subsystem.GetPrincipal(scope),
+		OpsPerSecond:   float32(arg.OpsPerSecond),
+		Timeout:        arg.Timeout,
+		MaxRows:        arg.MaxRows,
+		MaxUploadBytes: arg.MaxBytes,
+	}
+
+	if arg.Spec == nil && arg.Env != nil {
+		spec := ordereddict.NewDict()
+		for _, name := range arg.Artifacts {
+			spec.Set(name, arg.Env)
+		}
+
+		arg.Spec = spec
+	}
+
+	if arg.Spec == nil {
+		scope.Log("Either spec or env must be provided.")
+		return vfilter.Null{}
+	}
+
+	err = tools.AddSpecProtobuf(config_obj, repository, scope,
+		arg.Spec, request)
+	if err != nil {
+		scope.Log("Command can only run on the server")
+		return vfilter.Null{}
+	}
+
+	result := &flows_proto.ArtifactCollectorResponse{Request: request}
+	acl_manager, ok := artifacts.GetACLManager(scope)
+	if !ok {
+		acl_manager = vql_subsystem.NullACLManager{}
+	}
+
+	launcher, err := services.GetLauncher()
+	if err != nil {
+		return vfilter.Null{}
+	}
+
+	flow_id, err := launcher.ScheduleArtifactCollection(
+		ctx, config_obj, acl_manager, repository, request)
 	if err != nil {
 		scope.Log("collect_client: %v", err)
 		return vfilter.Null{}
 	}
 
 	// Notify the client about it.
-	err = services.NotifyListener(config_obj, arg.ClientId)
+	err = services.GetNotifier().NotifyListener(config_obj, arg.ClientId)
 	if err != nil {
 		scope.Log("collect_client: %v", err)
 		return vfilter.Null{}
 	}
 
 	result.FlowId = flow_id
-	return result
+	return json.ConvertProtoToOrderedDict(result)
 }
 
-func (self ScheduleCollectionFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self ScheduleCollectionFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "collect_client",
 		Doc:     "Launch an artifact collection against a client.",

@@ -20,7 +20,7 @@ sources:
            FROM pslist(pid=getpid())
          })
 
-  - precondition: SELECT OS From info() where OS = 'linux'
+  - precondition: SELECT OS From info() where OS != 'windows'
     queries:
       - SELECT * from foreach(
          row={
@@ -57,7 +57,7 @@ reports:
 
       {{ $client_info := Query "SELECT * FROM clients(client_id=ClientId) LIMIT 1" }}
 
-      # Client Footprint for {{ Get $client_info "0.OsInfo.Fqdn" }}
+      # Client Footprint for {{ Get $client_info "0.os_info.fqdn" }}
 
       The client has a client ID of {{ Get $client_info "0.client_id" }}.
       Clients report the Velociraptor process footprint to the
@@ -72,7 +72,9 @@ reports:
       idle, but if a heavy hunt is running this might climb
       substantially.
 
-      {{ Query "resources" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 }}
+        <div>
+        {{ Query "resources" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 }}
+        </div>
 
       ## VQL Query
 
@@ -84,3 +86,10 @@ reports:
 
       > To learn about managing end point performance with Velociraptor see
         the [blog post](https://docs.velociraptor.velocidex.com/blog/html/2019/02/10/velociraptor_performance.html).
+
+column_types:
+  - name: Timestamp
+    type: timestamp
+
+  - name: ClientId
+    type: client_id

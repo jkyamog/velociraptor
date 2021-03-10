@@ -24,20 +24,61 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
+var (
+	fileAccessorCurrentOpened = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "accessor_file_current_open",
+		Help: "Number of currently opened files with the file accessor.",
+	})
+)
+
+type _inode struct {
+	dev, inode uint64
+}
+
+// Keep track of symlinks we visited.
+type AccessorContext struct {
+	mu sync.Mutex
+
+	links map[_inode]bool
+}
+
+func (self *AccessorContext) LinkVisited(dev, inode uint64) {
+	id := _inode{dev, inode}
+
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.links[id] = true
+}
+
+func (self *AccessorContext) WasLinkVisited(dev, inode uint64) bool {
+	id := _inode{dev, inode}
+
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	_, pres := self.links[id]
+	return pres
+}
+
 type OSFileInfo struct {
-	_FileInfo  os.FileInfo
-	_full_path string
-	_data      interface{}
+	_FileInfo     os.FileInfo
+	_full_path    string
+	_accessor_ctx *AccessorContext
 }
 
 func (self *OSFileInfo) Size() int64 {
@@ -65,14 +106,29 @@ func (self *OSFileInfo) Sys() interface{} {
 }
 
 func (self *OSFileInfo) Data() interface{} {
-	if self._data == nil {
-		return ordereddict.NewDict()
+	if self.IsLink() {
+		path := strings.TrimRight(
+			strings.TrimLeft(self.FullPath(), "\\"), "\\")
+		target, err := os.Readlink(path)
+		if err == nil {
+			return ordereddict.NewDict().
+				Set("Link", target)
+		}
 	}
-	return self._data
+
+	return ordereddict.NewDict()
 }
 
 func (self *OSFileInfo) FullPath() string {
 	return self._full_path
+}
+
+// On Linux we need xstat() support to get birth time.
+func (self *OSFileInfo) Btime() utils.TimeVal {
+	return utils.TimeVal{
+		Sec:  0,
+		Nsec: 0,
+	}
 }
 
 func (self *OSFileInfo) Mtime() utils.TimeVal {
@@ -104,13 +160,28 @@ func (self *OSFileInfo) IsLink() bool {
 }
 
 func (self *OSFileInfo) GetLink() (string, error) {
-	target, err := os.Readlink(self._full_path)
+	sys, ok := self._FileInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", errors.New("Symlink not supported")
+	}
+
+	if self._accessor_ctx.WasLinkVisited(sys.Dev, sys.Ino) {
+		return "", errors.New("Symlink cycle detected")
+	}
+	self._accessor_ctx.LinkVisited(sys.Dev, sys.Ino)
+
+	// For now we dont support links so we dont get stuck in a
+	// cycle.
+	ret, err := os.Readlink(strings.TrimRight(self._full_path, "/"))
 	if err != nil {
 		return "", err
 	}
 
-	return "", errors.New("Links not supported")
-	return target, nil
+	if !strings.HasPrefix(ret, "/") {
+		ret = "/" + ret
+	}
+
+	return ret, nil
 }
 
 func (self *OSFileInfo) _Sys() *syscall.Stat_t {
@@ -118,10 +189,16 @@ func (self *OSFileInfo) _Sys() *syscall.Stat_t {
 }
 
 // Real implementation for non windows OSs:
-type OSFileSystemAccessor struct{}
+type OSFileSystemAccessor struct {
+	context *AccessorContext
+}
 
-func (self OSFileSystemAccessor) New(scope *vfilter.Scope) (FileSystemAccessor, error) {
-	return &OSFileSystemAccessor{}, nil
+func (self OSFileSystemAccessor) New(scope vfilter.Scope) (FileSystemAccessor, error) {
+	return &OSFileSystemAccessor{
+		context: &AccessorContext{
+			links: make(map[_inode]bool),
+		},
+	}, nil
 }
 
 func (self OSFileSystemAccessor) Lstat(filename string) (FileInfo, error) {
@@ -130,10 +207,26 @@ func (self OSFileSystemAccessor) Lstat(filename string) (FileInfo, error) {
 		return nil, err
 	}
 
-	return &OSFileInfo{lstat, filename, nil}, nil
+	return &OSFileInfo{
+		_FileInfo:     lstat,
+		_full_path:    filename,
+		_accessor_ctx: self.context,
+	}, nil
 }
 
 func (self OSFileSystemAccessor) ReadDir(path string) ([]FileInfo, error) {
+	path = GetPath(path)
+
+	lstat, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Support symlinks and directories.
+	if lstat.Mode()&os.ModeSymlink == 0 && !lstat.IsDir() {
+		return nil, nil
+	}
+
 	files, err := utils.ReadDir(GetPath(path))
 	if err != nil {
 		return nil, err
@@ -142,19 +235,51 @@ func (self OSFileSystemAccessor) ReadDir(path string) ([]FileInfo, error) {
 	var result []FileInfo
 	for _, f := range files {
 		result = append(result,
-			&OSFileInfo{f, filepath.Join(path, f.Name()), nil})
+			&OSFileInfo{
+				_FileInfo:     f,
+				_full_path:    filepath.Join(path, f.Name()),
+				_accessor_ctx: self.context,
+			})
 	}
 
 	return result, nil
 }
 
+// Wrap the os.File object to keep track of open file handles.
+type OSFileWrapper struct {
+	*os.File
+}
+
+func (self OSFileWrapper) Close() error {
+	fileAccessorCurrentOpened.Dec()
+	return self.File.Close()
+}
+
 func (self OSFileSystemAccessor) Open(path string) (ReadSeekCloser, error) {
-	file, err := os.Open(GetPath(path))
+	var err error
+
+	// Eval any symlinks directly
+	path, err = filepath.EvalSymlinks(GetPath(path))
 	if err != nil {
 		return nil, err
 	}
 
-	return file, nil
+	lstat, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if !lstat.Mode().IsRegular() {
+		return nil, errors.New("Only regular files supported")
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	fileAccessorCurrentOpened.Inc()
+	return OSFileWrapper{file}, nil
 }
 
 func GetPath(path string) string {

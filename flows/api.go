@@ -20,6 +20,7 @@ package flows
 import (
 	"context"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,16 +33,20 @@ import (
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
-	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 )
 
+var (
+	get_flows_sub_query_count = 1000
+)
+
+// Filter will be applied on flows to remove those we dont care about.
 func GetFlows(
 	config_obj *config_proto.Config,
 	client_id string, include_archived bool,
+	flow_filter func(flow *flows_proto.ArtifactCollectorContext) bool,
 	offset uint64, length uint64) (*api_proto.ApiFlowResponse, error) {
 
 	result := &api_proto.ApiFlowResponse{}
@@ -50,35 +55,84 @@ func GetFlows(
 		return nil, err
 	}
 
-	flow_urns, err := db.ListChildren(
-		config_obj, path.Dir(GetCollectionPath(client_id, "X")),
-		offset, length)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, urn := range flow_urns {
-		// Hide the monitoring flow since it is not a real flow.
-		if strings.HasSuffix(urn, constants.MONITORING_WELL_KNOWN_FLOW) {
-			continue
-		}
-
-		collection_context := &flows_proto.ArtifactCollectorContext{}
-		err := db.GetSubject(config_obj, urn, collection_context)
+	// Call db.ListChildren() repeatadly until we satify our
+	// required set.
+	db_count := uint64(get_flows_sub_query_count)
+	row_count := uint64(0)
+	for db_offset := uint64(0); ; db_offset += db_count {
+		flow_path_manager := paths.NewFlowPathManager(client_id, "")
+		flow_urns, err := db.ListChildren(config_obj, flow_path_manager.ContainerPath(),
+			db_offset, db_count)
 		if err != nil {
-			logging.GetLogger(
-				config_obj, &logging.FrontendComponent).
-				Error("Unable to open collection", err)
-			continue
+			return nil, err
 		}
 
-		if !include_archived &&
-			collection_context.State ==
-				flows_proto.ArtifactCollectorContext_ARCHIVED {
-			continue
+		// No flows were returned.
+		if len(flow_urns) == 0 {
+			return result, nil
 		}
 
-		result.Items = append(result.Items, collection_context)
+		// Flow IDs represent timestamp so they are sortable. The UI
+		// relies on more recent flows being at the top.
+		sort.Slice(flow_urns, func(i, j int) bool {
+			return flow_urns[i] > flow_urns[j]
+		})
+
+		// Collect the items that match from this backend read
+		// into an array
+		items := []*flows_proto.ArtifactCollectorContext{}
+
+		for _, urn := range flow_urns {
+			// Hide the monitoring flow since it is not a real flow.
+			if strings.HasSuffix(urn, constants.MONITORING_WELL_KNOWN_FLOW) {
+				continue
+			}
+
+			collection_context := &flows_proto.ArtifactCollectorContext{}
+			err := db.GetSubject(config_obj, urn, collection_context)
+			if err != nil {
+				logging.GetLogger(
+					config_obj, &logging.FrontendComponent).
+					Error("Unable to open collection: %v", err)
+				continue
+			}
+
+			if !include_archived &&
+				collection_context.State ==
+					flows_proto.ArtifactCollectorContext_ARCHIVED {
+				continue
+			}
+
+			if !flow_filter(collection_context) {
+				continue
+			}
+
+			// This is a valid row - count it and maybe
+			// include in the result set.
+			row_count++
+			if row_count <= offset {
+				continue
+			}
+
+			items = append(items, collection_context)
+
+			// We have enough items - just return it
+			if uint64(len(items)+len(result.Items)) >= length {
+				break
+			}
+		}
+
+		// Prepend the items: Since backend reads are returned
+		// in increasing order the next read will come before
+		// the previous backend read. Note this is still not
+		// correct as paging will break it.
+		result.Items = append(items, result.Items...)
+
+		// The ListChildren returned less than the full set,
+		// so there are no more results.
+		if uint64(len(flow_urns)) < db_count {
+			break
+		}
 	}
 	return result, nil
 }
@@ -95,9 +149,10 @@ func GetFlowDetails(
 		return nil, err
 	}
 
-	urn := GetCollectionPath(client_id, flow_id)
+	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
 	collection_context := &flows_proto.ArtifactCollectorContext{}
-	err = db.GetSubject(config_obj, urn, collection_context)
+	err = db.GetSubject(config_obj,
+		flow_path_manager.Path(), collection_context)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +196,8 @@ func getAvailableDownloadFiles(config_obj *config_proto.Config,
 	}
 
 	for _, item := range files {
-		if strings.HasSuffix(item.Name(), ".lock") {
+		if strings.HasSuffix(item.Name(), ".lock") ||
+			!item.Mode().IsRegular() {
 			continue
 		}
 
@@ -160,9 +216,8 @@ func getAvailableDownloadFiles(config_obj *config_proto.Config,
 func CancelFlow(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	client_id, flow_id, username string,
-	api_client_factory grpc_client.APIClientFactory) (
-	*api_proto.StartFlowResponse, error) {
+	client_id, flow_id, username string) (
+	res *api_proto.StartFlowResponse, err error) {
 	if flow_id == "" || client_id == "" {
 		return &api_proto.StartFlowResponse{}, nil
 	}
@@ -170,7 +225,12 @@ func CancelFlow(
 	collection_context, err := LoadCollectionContext(
 		config_obj, client_id, flow_id)
 	if err == nil {
-		defer closeContext(config_obj, collection_context)
+		defer func() {
+			close_err := closeContext(config_obj, collection_context)
+			if err == nil {
+				err = close_err
+			}
+		}()
 
 		if collection_context.State != flows_proto.ArtifactCollectorContext_RUNNING {
 			return nil, errors.New("Flow is not in the running state. " +
@@ -216,7 +276,7 @@ func CancelFlow(
 		return nil, err
 	}
 
-	err = services.NotifyListener(config_obj, client_id)
+	err = services.GetNotifier().NotifyListener(config_obj, client_id)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +289,7 @@ func CancelFlow(
 func ArchiveFlow(
 	config_obj *config_proto.Config,
 	client_id string, flow_id string, username string) (
-	*api_proto.StartFlowResponse, error) {
+	res *api_proto.StartFlowResponse, err error) {
 	if flow_id == "" || client_id == "" {
 		return &api_proto.StartFlowResponse{}, nil
 	}
@@ -239,9 +299,14 @@ func ArchiveFlow(
 	if err != nil {
 		return nil, err
 	}
-	defer closeContext(config_obj, collection_context)
+	defer func() {
+		close_err := closeContext(config_obj, collection_context)
+		if err == nil {
+			err = close_err
+		}
+	}()
 
-	if collection_context.State != flows_proto.ArtifactCollectorContext_TERMINATED &&
+	if collection_context.State != flows_proto.ArtifactCollectorContext_FINISHED &&
 		collection_context.State != flows_proto.ArtifactCollectorContext_ERROR {
 		return nil, errors.New("Flow must be stopped before it can be archived.")
 	}
@@ -256,13 +321,16 @@ func ArchiveFlow(
 		Set("Timestamp", time.Now().UTC().Unix()).
 		Set("Flow", collection_context)
 
-	path_manager := result_sets.NewArtifactPathManager(config_obj,
-		client_id, flow_id, "System.Flow.Archive")
+	journal, err := services.GetJournal()
+	if err != nil {
+		return nil, err
+	}
 
 	return &api_proto.StartFlowResponse{
 			FlowId: flow_id,
-		}, services.GetJournal().PushRows(path_manager,
-			[]*ordereddict.Dict{row})
+		}, journal.PushRowsToArtifact(config_obj,
+			[]*ordereddict.Dict{row},
+			"System.Flow.Archive", client_id, flow_id)
 }
 
 func GetFlowRequests(
@@ -280,32 +348,12 @@ func GetFlowRequests(
 
 	result := &api_proto.ApiFlowRequestDetails{}
 
+	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
 	flow_details := &api_proto.ApiFlowRequestDetails{}
-	err = db.GetSubject(config_obj,
-		path.Join(GetCollectionPath(client_id, flow_id), "task"),
+	err = db.GetSubject(config_obj, flow_path_manager.Task().Path(),
 		flow_details)
 	if err != nil {
 		return nil, err
-	}
-
-	// Set the task_id in the details protobuf.
-	set_task_id_in_details := func(request_id, task_id uint64) bool {
-		for _, item := range flow_details.Items {
-			if item.RequestId == request_id {
-				item.TaskId = task_id
-				return true
-			}
-		}
-
-		return false
-	}
-
-	requests, err := db.GetClientTasks(config_obj, client_id, true)
-	if err != nil {
-		return nil, err
-	}
-	for _, request := range requests {
-		set_task_id_in_details(request.RequestId, request.TaskId)
 	}
 
 	if offset > uint64(len(flow_details.Items)) {

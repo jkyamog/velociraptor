@@ -3,6 +3,7 @@ package artifacts
 import (
 	"regexp"
 
+	"github.com/pkg/errors"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/crypto"
@@ -19,14 +20,14 @@ var (
 func Obfuscate(
 	config_obj *config_proto.Config,
 	result *actions_proto.VQLCollectorArgs) error {
-	scope := vql_subsystem.MakeScope()
 	var err error
 
 	// Do not do anything if we do not compress artifacts.
-	if config_obj.Frontend.DoNotCompressArtifacts {
+	if config_obj.Frontend == nil || config_obj.Frontend.DoNotCompressArtifacts {
 		return nil
 	}
 
+	scope := vql_subsystem.MakeScope()
 	for _, query := range result.Query {
 		if query.Name != "" {
 			query.Name, err = obfuscator.Encrypt(config_obj, query.Name)
@@ -41,7 +42,7 @@ func Obfuscate(
 		// forms. This removes comments.
 		ast, err := vfilter.Parse(query.VQL)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "While parsing VQL: "+query.VQL)
 		}
 
 		// TODO: Compress the AST.

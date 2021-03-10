@@ -21,15 +21,22 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/file_store/result_sets"
 	"www.velocidex.com/golang/velociraptor/flows"
 	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/result_sets"
+	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
+	"www.velocidex.com/golang/velociraptor/reporting"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/server/hunts"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -42,7 +49,7 @@ type UploadsPlugins struct{}
 
 func (self UploadsPlugins) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -57,7 +64,7 @@ func (self UploadsPlugins) Call(
 
 		arg := &UploadsPluginsArgs{}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
@@ -79,7 +86,11 @@ func (self UploadsPlugins) Call(
 		}
 
 		for row := range row_chan {
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- row:
+			}
 		}
 	}()
 
@@ -87,7 +98,7 @@ func (self UploadsPlugins) Call(
 }
 
 func (self UploadsPlugins) Info(
-	scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "uploads",
 		Doc:     "Retrieve information about a flow's uploads.",
@@ -95,23 +106,48 @@ func (self UploadsPlugins) Info(
 	}
 }
 
+// A one stop shop plugin for retrieving result sets collected from
+// various places. Depending on the options used, the results come
+// from different places in the filestore.
 type SourcePluginArgs struct {
-	ClientId  string `vfilter:"optional,field=client_id,doc=The client id to extract"`
-	DayName   string `vfilter:"optional,field=day_name,doc=Only extract this day's Monitoring logs (deprecated)"`
-	StartTime int64  `vfilter:"optional,field=start_time,doc=Start return events from this date (for event sources)"`
-	EndTime   int64  `vfilter:"optional,field=end_time,doc=Stop end events reach this time (event sources)."`
-	FlowId    string `vfilter:"optional,field=flow_id,doc=A flow ID (client or server artifacts)"`
-	HuntId    string `vfilter:"optional,field=hunt_id,doc=Retrieve sources from this hunt (combines all results from all clients)"`
-	Artifact  string `vfilter:"optional,field=artifact,doc=The name of the artifact collection to fetch"`
-	Source    string `vfilter:"optional,field=source,doc=An optional named source within the artifact"`
-	Mode      string `vfilter:"optional,field=mode,doc=HUNT or CLIENT mode can be empty"`
+	// Collected artifacts from clients should specify the client
+	// id and flow id as well as the artifact and source.
+	ClientId string `vfilter:"optional,field=client_id,doc=The client id to extract"`
+	FlowId   string `vfilter:"optional,field=flow_id,doc=A flow ID (client or server artifacts)"`
+
+	// Specifying the hunt id will retrieve all rows in this hunt
+	// (from all clients). You still need to specify the artifact
+	// name.
+	HuntId string `vfilter:"optional,field=hunt_id,doc=Retrieve sources from this hunt (combines all results from all clients)"`
+
+	// Artifacts are specified by name and source. Name may
+	// include the source following the artifact name by a slash -
+	// e.g. Custom.Artifact/SourceName.
+	Artifact string `vfilter:"optional,field=artifact,doc=The name of the artifact collection to fetch"`
+	Source   string `vfilter:"optional,field=source,doc=An optional named source within the artifact"`
+
+	// If the artifact name specifies an event artifact, you may
+	// also specify start and end times to return.
+	StartTime int64 `vfilter:"optional,field=start_time,doc=Start return events from this date (for event sources)"`
+	EndTime   int64 `vfilter:"optional,field=end_time,doc=Stop end events reach this time (event sources)."`
+
+	// A source may specify a notebook cell to read from - this
+	// allows post processing in multiple stages - one query
+	// reduces the data into a result set and subsequent queries
+	// operate on that reduced set.
+	NotebookId        string `vfilter:"optional,field=notebook_id,doc=The notebook to read from (shoud also include cell id)"`
+	NotebookCellId    string `vfilter:"optional,field=notebook_cell_id,doc=The notebook cell read from (shoud also include notebook id)"`
+	NotebookCellTable int64  `vfilter:"optional,field=notebook_cell_table,doc=A notebook cell can have multiple tables.)"`
+
+	StartRow int64 `vfilter:"optional,field=start_row,doc=Start reading the result set from this row"`
+	Limit    int64 `vfilter:"optional,field=count,doc=Maximum number of clients to fetch (default unlimited)'"`
 }
 
 type SourcePlugin struct{}
 
 func (self SourcePlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -125,7 +161,7 @@ func (self SourcePlugin) Call(
 		}
 
 		arg := &SourcePluginArgs{}
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
@@ -153,30 +189,44 @@ func (self SourcePlugin) Call(
 				Set("source", arg.Source)
 
 			// Just delegate to the hunt_results() plugin.
-			plugin := &HuntResultsPlugin{}
+			plugin := &hunts.HuntResultsPlugin{}
 			for row := range plugin.Call(ctx, scope, args) {
-				output_chan <- row
+				select {
+				case <-ctx.Done():
+					return
+				case output_chan <- row:
+				}
 			}
 			return
 		}
 
-		if arg.Source != "" {
-			arg.Artifact = arg.Artifact + "/" + arg.Source
-			arg.Source = ""
-		}
-
-		path_manager := result_sets.NewArtifactPathManager(
-			config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
-
-		row_chan, err := file_store.GetTimeRange(
-			ctx, config_obj, path_manager, arg.StartTime, arg.EndTime)
+		// Depending on the parameters, we need to read from
+		// different places.
+		result_set_reader, err := getResultSetReader(ctx, config_obj, arg)
 		if err != nil {
 			scope.Log("source: %v", err)
 			return
 		}
 
-		for row := range row_chan {
-			output_chan <- row
+		if arg.StartRow > 0 {
+			err = result_set_reader.SeekToRow(arg.StartRow)
+			if err != nil {
+				scope.Log("source: %v", err)
+				return
+			}
+		}
+
+		count := int64(0)
+		for row := range result_set_reader.Rows(ctx) {
+			if arg.Limit > 0 && count >= arg.Limit {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- row:
+				count++
+			}
 		}
 	}()
 
@@ -184,19 +234,136 @@ func (self SourcePlugin) Call(
 }
 
 func (self SourcePlugin) Info(
-	scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "source",
-		Doc:     "Retrieve rows from an artifact's source.",
+		Doc:     "Retrieve rows from stored result sets. This is a one stop show for retrieving stored result set for post processing.",
 		ArgType: type_map.AddType(scope, &SourcePluginArgs{}),
 	}
 }
 
+// Figure out if the artifact is an event artifact based on its
+// definition.
+func isArtifactEvent(
+	config_obj *config_proto.Config,
+	arg *SourcePluginArgs) (bool, error) {
+
+	manager, err := services.GetRepositoryManager()
+	if err != nil {
+		return false, err
+	}
+
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return false, err
+	}
+
+	artifact_definition, pres := repository.Get(config_obj, arg.Artifact)
+	if !pres {
+		return false, errors.New(fmt.Sprintf(
+			"Artifact %v not known", arg.Artifact))
+	}
+
+	switch artifact_definition.Type {
+	case "client_event":
+		if arg.ClientId == "" {
+			return false, errors.New(fmt.Sprintf(
+				"Artifact %v is a client event artifact, "+
+					"therefore a client id is required.",
+				artifact_definition.Name))
+		}
+		return true, nil
+
+	case "server_event":
+		return true, nil
+
+	default:
+		return false, nil
+	}
+}
+
+func getResultSetReader(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	arg *SourcePluginArgs) (result_sets.ResultSetReader, error) {
+
+	file_store_factory := file_store.GetFileStore(config_obj)
+
+	// Is it a notebook?
+	if arg.NotebookId != "" {
+		if arg.NotebookCellId == "" {
+			return nil, errors.New("source: Both notebook_id and notebook_cell_id should be specified.")
+		}
+		table := arg.NotebookCellTable
+		if table == 0 {
+			table = 1
+		}
+		path_manager := reporting.NewNotebookPathManager(
+			arg.NotebookId).Cell(arg.NotebookCellId).QueryStorage(table)
+
+		return result_sets.NewResultSetReader(file_store_factory, path_manager)
+
+	} else if arg.Artifact != "" {
+		if arg.Source != "" {
+			arg.Artifact = arg.Artifact + "/" + arg.Source
+			arg.Source = ""
+		}
+
+		is_event, err := isArtifactEvent(config_obj, arg)
+		if err != nil {
+			return nil, err
+		}
+
+		// Event result sets can be sliced by time ranges.
+		if is_event {
+			if arg.EndTime == 0 {
+				arg.EndTime = time.Now().Unix()
+			}
+
+			path_manager := artifact_paths.NewArtifactPathManager(
+				config_obj, arg.ClientId, "", arg.Artifact)
+
+			return result_sets.NewTimedResultSetReader(ctx, file_store_factory,
+				path_manager, uint64(arg.StartTime), uint64(arg.EndTime))
+
+		}
+
+		// Must specify a client id and flow id for regular
+		// collections.
+		if arg.FlowId == "" || arg.ClientId == "" {
+			return nil, errors.New("source: client_id and flow_id should " +
+				"be specified for non event artifacts.")
+		}
+
+		path_manager := artifact_paths.NewArtifactPathManager(
+			config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
+
+		return result_sets.NewResultSetReader(file_store_factory, path_manager)
+
+	}
+
+	return nil, errors.New(
+		"source: One of artifact, flow_id, hunt_id, notebook_id should be specified.")
+}
+
 // Override SourcePluginArgs from the scope.
-func ParseSourceArgsFromScope(arg *SourcePluginArgs, scope *vfilter.Scope) {
+func ParseSourceArgsFromScope(arg *SourcePluginArgs, scope vfilter.Scope) {
 	client_id, pres := scope.Resolve("ClientId")
 	if pres {
 		arg.ClientId, _ = client_id.(string)
+	}
+
+	flow_id, pres := scope.Resolve("FlowId")
+	if pres {
+		arg.FlowId, _ = flow_id.(string)
+	}
+
+	artifact_name, pres := scope.Resolve("ArtifactName")
+	if pres {
+		artifact, ok := artifact_name.(string)
+		if ok {
+			arg.Artifact = artifact
+		}
 	}
 
 	start_time, pres := scope.Resolve("StartTime")
@@ -209,9 +376,28 @@ func ParseSourceArgsFromScope(arg *SourcePluginArgs, scope *vfilter.Scope) {
 		arg.EndTime, _ = end_time.(int64)
 	}
 
-	flow_id, pres := scope.Resolve("FlowId")
+	notebook_id, pres := scope.Resolve("NotebookId")
 	if pres {
-		arg.FlowId, _ = flow_id.(string)
+		arg.NotebookId, _ = notebook_id.(string)
+	}
+	notebook_cell_id, pres := scope.Resolve("NotebookCellId")
+	if pres {
+		arg.NotebookCellId, _ = notebook_cell_id.(string)
+	}
+
+	notebook_cell_table, pres := scope.Resolve("NotebookCellTable")
+	if pres {
+		arg.NotebookCellTable, _ = notebook_cell_table.(int64)
+	}
+
+	start_row, pres := scope.Resolve("StartRow")
+	if pres {
+		arg.StartRow, _ = start_row.(int64)
+	}
+
+	limit, pres := scope.Resolve("Limit")
+	if pres {
+		arg.Limit, _ = limit.(int64)
 	}
 
 	hunt_id, pres := scope.Resolve("HuntId")
@@ -219,15 +405,6 @@ func ParseSourceArgsFromScope(arg *SourcePluginArgs, scope *vfilter.Scope) {
 		arg.HuntId, _ = hunt_id.(string)
 	}
 
-	artifact_name, pres := scope.Resolve("ArtifactName")
-	if pres {
-		arg.Artifact = artifact_name.(string)
-	}
-
-	mode, pres := scope.Resolve("ReportMode")
-	if pres {
-		arg.Mode = mode.(string)
-	}
 }
 
 type FlowResultsPluginArgs struct {
@@ -241,7 +418,7 @@ type FlowResultsPlugin struct{}
 
 func (self FlowResultsPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	go func() {
@@ -260,7 +437,7 @@ func (self FlowResultsPlugin) Call(
 			return
 		}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
@@ -275,12 +452,14 @@ func (self FlowResultsPlugin) Call(
 				return
 			}
 
-			requested_artifacts := flow.Context.Request.Artifacts
-			if len(requested_artifacts) == 0 {
-				scope.Log("flow_results: no artifacts in hunt")
-				return
+			if flow.Context != nil && flow.Context.Request != nil {
+				requested_artifacts := flow.Context.Request.Artifacts
+				if len(requested_artifacts) == 0 {
+					scope.Log("flow_results: no artifacts in hunt")
+					return
+				}
+				arg.Artifact = requested_artifacts[0]
 			}
-			arg.Artifact = requested_artifacts[0]
 		}
 
 		if arg.Source != "" {
@@ -288,7 +467,7 @@ func (self FlowResultsPlugin) Call(
 			arg.Source = ""
 		}
 
-		path_manager := result_sets.NewArtifactPathManager(
+		path_manager := artifact_paths.NewArtifactPathManager(
 			config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
 		row_chan, err := file_store.GetTimeRange(
 			ctx, config_obj, path_manager, 0, 0)
@@ -298,14 +477,18 @@ func (self FlowResultsPlugin) Call(
 		}
 
 		for row := range row_chan {
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- row:
+			}
 		}
 	}()
 
 	return output_chan
 }
 
-func (self FlowResultsPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self FlowResultsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "flow_results",
 		Doc:     "Retrieve the results of a flow.",

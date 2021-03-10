@@ -68,8 +68,8 @@ var (
 
 // Addr is implemented compatibility to psutil
 type Addr struct {
-	IP   string `json:"ip"`
-	Port uint32 `json:"port"`
+	IP   string
+	Port uint32
 }
 
 type ConnectionStat struct {
@@ -108,7 +108,7 @@ func (self *ConnectionStat) TypeString() string {
 // The VQL WMI plugin.
 type NetstatArgs struct{}
 
-func runNetstat(scope *vfilter.Scope,
+func runNetstat(scope vfilter.Scope,
 	args *ordereddict.Dict) []vfilter.Row {
 	var result []vfilter.Row
 

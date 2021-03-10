@@ -5,7 +5,6 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -13,13 +12,14 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/ptypes/empty"
+	errors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	context "golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
@@ -44,6 +44,8 @@ func (self *ApiServer) ExportNotebook(
 func (self *ApiServer) GetNotebooks(
 	ctx context.Context,
 	in *api_proto.NotebookCellRequest) (*api_proto.Notebooks, error) {
+
+	defer Instrument("GetNotebooks")()
 
 	// Empty creators are called internally.
 	user_name := GetGRPCUserInfo(self.config, ctx).Name
@@ -73,16 +75,22 @@ func (self *ApiServer) GetNotebooks(
 		notebook := &api_proto.NotebookMetadata{}
 		err := db.GetSubject(self.config, notebook_path_manager.Path(),
 			notebook)
+
+		// Handle the EOF especially: it means there is no such
+		// notebook and return an empty result set.
+		if errors.Cause(err) == io.EOF {
+			return result, nil
+		}
 		if err != nil {
 			logging.GetLogger(
 				self.config, &logging.FrontendComponent).
-				Error("Unable to open notebook", err)
+				Error("Unable to open notebook: %v", err)
 			return nil, err
 		}
 
 		// An error here just means there are no AvailableDownloads.
 		notebook.AvailableDownloads, _ = getAvailableDownloadFiles(self.config,
-			path.Join("/downloads/notebooks/", in.NotebookId))
+			path.Dir(notebook_path_manager.HtmlExport()))
 		result.Items = append(result.Items, notebook)
 
 		// Document not owned or collaborated with.
@@ -113,7 +121,7 @@ func (self *ApiServer) GetNotebooks(
 
 func NewNotebookId() string {
 	buf := make([]byte, 8)
-	rand.Read(buf)
+	_, _ = rand.Read(buf)
 
 	binary.BigEndian.PutUint32(buf, uint32(time.Now().Unix()))
 	result := base32.HexEncoding.EncodeToString(buf)[:13]
@@ -123,7 +131,7 @@ func NewNotebookId() string {
 
 func NewNotebookAttachmentId() string {
 	buf := make([]byte, 8)
-	rand.Read(buf)
+	_, _ = rand.Read(buf)
 
 	binary.BigEndian.PutUint32(buf, uint32(time.Now().Unix()))
 	result := base32.HexEncoding.EncodeToString(buf)[:13]
@@ -133,7 +141,7 @@ func NewNotebookAttachmentId() string {
 
 func NewNotebookCellId() string {
 	buf := make([]byte, 8)
-	rand.Read(buf)
+	_, _ = rand.Read(buf)
 
 	binary.BigEndian.PutUint32(buf, uint32(time.Now().Unix()))
 	result := base32.HexEncoding.EncodeToString(buf)[:13]
@@ -143,7 +151,9 @@ func NewNotebookCellId() string {
 
 func (self *ApiServer) NewNotebook(
 	ctx context.Context,
-	in *api_proto.NotebookMetadata) (*empty.Empty, error) {
+	in *api_proto.NotebookMetadata) (*api_proto.NotebookMetadata, error) {
+
+	defer Instrument("NewNotebook")()
 
 	user_name := GetGRPCUserInfo(self.config, ctx).Name
 	user_record, err := users.GetUser(self.config, user_name)
@@ -161,7 +171,12 @@ func (self *ApiServer) NewNotebook(
 	in.Creator = user_name
 	in.CreatedTime = time.Now().Unix()
 	in.ModifiedTime = in.CreatedTime
-	in.NotebookId = NewNotebookId()
+
+	// Allow hunt notebooks to be created with specified hunt ID.
+	if !strings.HasPrefix(in.NotebookId, "N.H.") &&
+		!strings.HasPrefix(in.NotebookId, "N.F.") {
+		in.NotebookId = NewNotebookId()
+	}
 
 	new_cell_id := NewNotebookCellId()
 
@@ -177,6 +192,9 @@ func (self *ApiServer) NewNotebook(
 
 	notebook_path_manager := reporting.NewNotebookPathManager(in.NotebookId)
 	err = db.SetSubject(self.config, notebook_path_manager.Path(), in)
+	if err != nil {
+		return nil, err
+	}
 
 	// Add a new single cell to the notebook.
 	new_cell_request := &api_proto.NotebookCellRequest{
@@ -187,19 +205,29 @@ func (self *ApiServer) NewNotebook(
 		CurrentlyEditing: true,
 	}
 
-	// Add the new notebook to the index so it can be seen.
+	// Add the new notebook to the index so it can be seen. Only
+	// non-hunt notebooks are searchable in the index since the
+	// hunt notebooks are always found in the hunt results.
 	err = reporting.UpdateShareIndex(self.config, in)
 	if err != nil {
 		return nil, err
 	}
 
 	_, err = self.UpdateNotebookCell(ctx, new_cell_request)
-	return &empty.Empty{}, err
+	if err != nil {
+		return nil, err
+	}
+
+	notebook := &api_proto.NotebookMetadata{}
+	err = db.GetSubject(self.config, notebook_path_manager.Path(), notebook)
+	return notebook, err
 }
 
 func (self *ApiServer) NewNotebookCell(
 	ctx context.Context,
 	in *api_proto.NotebookCellRequest) (*api_proto.NotebookMetadata, error) {
+
+	defer Instrument("NewNotebookCell")()
 
 	if !strings.HasPrefix(in.NotebookId, "N.") {
 		return nil, errors.New("Invalid NoteboookId")
@@ -295,6 +323,8 @@ func (self *ApiServer) UpdateNotebook(
 	ctx context.Context,
 	in *api_proto.NotebookMetadata) (*api_proto.NotebookMetadata, error) {
 
+	defer Instrument("UpdateNotebook")()
+
 	if !strings.HasPrefix(in.NotebookId, "N.") {
 		return nil, errors.New("Invalid NoteboookId")
 	}
@@ -334,7 +364,22 @@ func (self *ApiServer) UpdateNotebook(
 		return nil, errors.New("Edit clash detected.")
 	}
 
+	// When updating an existing notebook only certain fields may
+	// be changed by the user - definitely not the creator, created time or notebookId.
 	in.ModifiedTime = time.Now().Unix()
+	in.Creator = old_notebook.Creator
+	in.CreatedTime = old_notebook.CreatedTime
+	in.NotebookId = old_notebook.NotebookId
+
+	// Filter out any empty cells.
+	cell_metadata := make([]*api_proto.NotebookCell, 0, len(in.CellMetadata))
+	for i := 0; i < len(in.CellMetadata); i++ {
+		cell := in.CellMetadata[i]
+		if cell.CellId != "" {
+			cell_metadata = append(cell_metadata, cell)
+		}
+	}
+	in.CellMetadata = cell_metadata
 
 	err = db.SetSubject(self.config, notebook_path_manager.Path(), in)
 	if err != nil {
@@ -349,6 +394,8 @@ func (self *ApiServer) UpdateNotebook(
 func (self *ApiServer) GetNotebookCell(
 	ctx context.Context,
 	in *api_proto.NotebookCellRequest) (*api_proto.NotebookCell, error) {
+
+	defer Instrument("GetNotebookCell")()
 
 	if !strings.HasPrefix(in.NotebookId, "N.") {
 		return nil, errors.New("Invalid NoteboookId")
@@ -397,23 +444,15 @@ func (self *ApiServer) GetNotebookCell(
 
 	// Cell does not exist, make it a default cell.
 	if err == io.EOF {
-		notebook = &api_proto.NotebookCell{
+		return &api_proto.NotebookCell{
 			Input:  "",
 			Output: "",
 			Data:   "{}",
 			CellId: notebook.CellId,
 			Type:   "Markdown",
-		}
-
-		// And store it for next time.
-		err = db.SetSubject(self.config,
-			notebook_path_manager.Cell(in.CellId).Path(),
-			notebook)
-		if err != nil {
-			return nil, err
-		}
-
-	} else if err != nil {
+		}, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -423,6 +462,8 @@ func (self *ApiServer) GetNotebookCell(
 func (self *ApiServer) UpdateNotebookCell(
 	ctx context.Context,
 	in *api_proto.NotebookCellRequest) (*api_proto.NotebookCell, error) {
+
+	defer Instrument("UpdateNotebookCell")()
 
 	if !strings.HasPrefix(in.NotebookId, "N.") {
 		return nil, errors.New("Invalid NoteboookId")
@@ -471,7 +512,6 @@ func (self *ApiServer) UpdateNotebookCell(
 	}
 
 	// And store it for next time.
-
 	err = db.SetSubject(self.config,
 		notebook_path_manager.Cell(in.CellId).Path(),
 		notebook_cell)
@@ -484,7 +524,11 @@ func (self *ApiServer) UpdateNotebookCell(
 
 	acl_manager := vql_subsystem.NewServerACLManager(self.config, user_name)
 
-	global_repo, err := artifacts.GetGlobalRepository(self.config)
+	manager, err := services.GetRepositoryManager()
+	if err != nil {
+		return nil, err
+	}
+	global_repo, err := manager.GetGlobalRepository(self.config)
 	if err != nil {
 		return nil, err
 	}
@@ -495,6 +539,15 @@ func (self *ApiServer) UpdateNotebookCell(
 		"Server.Internal.ArtifactDescription")
 	if err != nil {
 		return nil, err
+	}
+
+	// Register a progress reporter so we can monitor how the
+	// template rendering is going.
+	tmpl.Progress = &progressReporter{
+		config_obj:    self.config,
+		notebook_cell: notebook_cell,
+		notebook_id:   in.NotebookId,
+		start:         time.Now(),
 	}
 
 	input := in.Input
@@ -515,9 +568,10 @@ func (self *ApiServer) UpdateNotebookCell(
 		}
 
 		// Update the artifact plugin in the template.
+		/* FIXME
 		artifact_plugin := artifacts.NewArtifactRepositoryPlugin(repository)
 		tmpl.Env.Set("Artifact", artifact_plugin)
-
+		*/
 		input = fmt.Sprintf(`{{ Query "SELECT * FROM Artifact.%v()" | Table}}`,
 			artifact_obj.Name)
 	}
@@ -537,7 +591,8 @@ func (self *ApiServer) UpdateNotebookCell(
 	go func() {
 		defer query_cancel()
 
-		cancel_notify, remove_notification := services.ListenForNotification(in.CellId)
+		cancel_notify, remove_notification := services.GetNotifier().
+			ListenForNotification(in.CellId)
 		defer remove_notification()
 
 		select {
@@ -546,11 +601,11 @@ func (self *ApiServer) UpdateNotebookCell(
 
 		// Active cancellation from the GUI.
 		case <-cancel_notify:
-			tmpl.Scope.Log("Cancelled after %v !", time.Now().Sub(start_time))
+			tmpl.Scope.Log("Cancelled after %v !", time.Since(start_time))
 
 			// Set a timeout.
 		case <-time.After(10 * time.Minute):
-			tmpl.Scope.Log("Query timed out after %v !", time.Now().Sub(start_time))
+			tmpl.Scope.Log("Query timed out after %v !", time.Since(start_time))
 		}
 
 	}()
@@ -566,13 +621,16 @@ func (self *ApiServer) UpdateNotebookCell(
 		// released.
 		defer query_cancel()
 
+		// Close the template when we are done with it.
+		defer tmpl.Close()
+
 		resp, err := updateCellContents(query_ctx, self.config, tmpl,
 			in.CurrentlyEditing, in.NotebookId,
 			in.CellId, cell_type, input, in.Input)
 		if err != nil {
 			main_err = err
 			logger := logging.GetLogger(self.config, &logging.GUIComponent)
-			logger.Error("Rendering error", err)
+			logger.Error("Rendering error: %v", err)
 		}
 
 		// Update the response if we can.
@@ -583,9 +641,7 @@ func (self *ApiServer) UpdateNotebookCell(
 	// the response takes too long, just give up and return a
 	// continuation. The GUI will continue polling for notebook
 	// state and will pick up the changes by itself.
-	select {
-	case <-sub_ctx.Done():
-	}
+	<-sub_ctx.Done()
 
 	return notebook_cell, main_err
 }
@@ -593,6 +649,8 @@ func (self *ApiServer) UpdateNotebookCell(
 func (self *ApiServer) CancelNotebookCell(
 	ctx context.Context,
 	in *api_proto.NotebookCellRequest) (*empty.Empty, error) {
+
+	defer Instrument("CancelNotebookCell")()
 
 	if !strings.HasPrefix(in.NotebookId, "N.") {
 		return nil, errors.New("Invalid NoteboookId")
@@ -615,12 +673,37 @@ func (self *ApiServer) CancelNotebookCell(
 			"User is not allowed to edit notebooks.")
 	}
 
-	return &empty.Empty{}, services.NotifyListener(self.config, in.CellId)
+	// Unset the calculating bit in the notebook in case the
+	// renderer is not actually running (e.g. server restart).
+	db, err := datastore.GetDB(self.config)
+	if err != nil {
+		return nil, err
+	}
+	notebook_cell_path_manager := reporting.NewNotebookPathManager(in.NotebookId).
+		Cell(in.CellId)
+	notebook_cell := &api_proto.NotebookCell{}
+	err = db.GetSubject(self.config, notebook_cell_path_manager.Path(),
+		notebook_cell)
+	if err != nil || notebook_cell.CellId != in.CellId {
+		return nil, errors.New("No such cell")
+	}
+
+	notebook_cell.Calculating = false
+	err = db.SetSubject(self.config, notebook_cell_path_manager.Path(),
+		notebook_cell)
+	if err != nil {
+		return nil, err
+	}
+
+	return &empty.Empty{}, services.GetNotifier().NotifyListener(self.config, in.CellId)
 }
 
 func (self *ApiServer) UploadNotebookAttachment(
 	ctx context.Context,
 	in *api_proto.NotebookFileUploadRequest) (*api_proto.NotebookFileUploadResponse, error) {
+
+	defer Instrument("UploadNotebookAttachment")()
+
 	user_name := GetGRPCUserInfo(self.config, ctx).Name
 	user_record, err := users.GetUser(self.config, user_name)
 	if err != nil {
@@ -663,6 +746,8 @@ func (self *ApiServer) UploadNotebookAttachment(
 func (self *ApiServer) CreateNotebookDownloadFile(
 	ctx context.Context,
 	in *api_proto.NotebookExportRequest) (*empty.Empty, error) {
+
+	defer Instrument("CreateNotebookDownloadFile")()
 
 	user_name := GetGRPCUserInfo(self.config, ctx).Name
 	user_record, err := users.GetUser(self.config, user_name)
@@ -720,7 +805,10 @@ func exportZipNotebook(
 	sub_ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 
 	go func() {
-		defer file_store_factory.Delete(filename + ".lock")
+		defer func() {
+			_ = file_store_factory.Delete(filename + ".lock")
+		}()
+
 		defer cancel()
 
 		err := reporting.ExportNotebookToZip(
@@ -775,7 +863,7 @@ func exportHTMLNotebook(config_obj *config_proto.Config,
 	sub_ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 
 	go func() {
-		defer file_store_factory.Delete(filename + ".lock")
+		defer func() { _ = file_store_factory.Delete(filename + ".lock") }()
 		defer writer.Close()
 		defer cancel()
 
@@ -867,15 +955,12 @@ func updateCellContents(
 		return nil, errors.New("Unsupported cell type")
 	}
 
-	db, err := datastore.GetDB(config_obj)
-	if err != nil {
-		return nil, err
-	}
-
 	encoded_data, err := json.Marshal(tmpl.Data)
 	if err != nil {
 		return nil, err
 	}
+
+	tmpl.Close()
 
 	notebook_cell := &api_proto.NotebookCell{
 		Input:            original_input,
@@ -886,28 +971,44 @@ func updateCellContents(
 		Type:             cell_type,
 		Timestamp:        time.Now().Unix(),
 		CurrentlyEditing: currently_editing,
+		Duration:         int64(time.Since(tmpl.Start).Seconds()),
+	}
+
+	return notebook_cell, setCell(config_obj, notebook_id, notebook_cell)
+}
+
+func setCell(
+	config_obj *config_proto.Config,
+	notebook_id string,
+	notebook_cell *api_proto.NotebookCell) error {
+
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return err
 	}
 
 	// And store it for next time.
 	notebook_path_manager := reporting.NewNotebookPathManager(notebook_id)
 	err = db.SetSubject(config_obj,
-		notebook_path_manager.Cell(cell_id).Path(),
+		notebook_path_manager.Cell(notebook_cell.CellId).Path(),
 		notebook_cell)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
+	// Open the notebook and update the cell's timestamp.
 	notebook := &api_proto.NotebookMetadata{}
 	err = db.GetSubject(config_obj, notebook_path_manager.Path(), notebook)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
+	// Update the cell's timestamp so the gui will refresh it.
 	new_cell_md := []*api_proto.NotebookCell{}
 	for _, cell_md := range notebook.CellMetadata {
-		if cell_md.CellId == cell_id {
+		if cell_md.CellId == notebook_cell.CellId {
 			new_cell_md = append(new_cell_md, &api_proto.NotebookCell{
-				CellId:    cell_id,
+				CellId:    notebook_cell.CellId,
 				Timestamp: time.Now().Unix(),
 			})
 			continue
@@ -916,6 +1017,40 @@ func updateCellContents(
 	}
 	notebook.CellMetadata = new_cell_md
 
-	err = db.SetSubject(config_obj, notebook_path_manager.Path(), notebook)
-	return notebook_cell, err
+	return db.SetSubject(config_obj, notebook_path_manager.Path(), notebook)
+}
+
+type progressReporter struct {
+	config_obj            *config_proto.Config
+	notebook_cell         *api_proto.NotebookCell
+	notebook_id, table_id string
+	last, start           time.Time
+}
+
+func (self *progressReporter) Report(message string) {
+	now := time.Now()
+	if now.Before(self.last.Add(4 * time.Second)) {
+		return
+	}
+
+	self.last = now
+	duration := time.Since(self.start).Round(time.Second)
+
+	notebook_cell := proto.Clone(self.notebook_cell).(*api_proto.NotebookCell)
+	notebook_cell.Output = fmt.Sprintf(`
+<div class="padded"><i class="fa fa-spinner fa-spin fa-fw"></i>
+   Calculating...  (%v after %v)
+</div>
+<div class="panel">
+   <grr-csv-viewer base-url="'v1/GetTable'"
+                   params='{"notebook_id":"%s","cell_id":"%s","table_id":1,"message": "%s"}' />
+</div>
+`,
+		message, duration,
+		self.notebook_id, self.notebook_cell.CellId, message)
+	notebook_cell.Timestamp = now.Unix()
+	notebook_cell.Duration = int64(duration.Seconds())
+
+	// Cant do anything if we can not set the notebook times
+	_ = setCell(self.config_obj, self.notebook_id, notebook_cell)
 }

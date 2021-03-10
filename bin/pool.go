@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"path"
+	"sync"
 
 	"github.com/Velocidex/yaml/v2"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
@@ -30,6 +31,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/crypto"
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/http_comms"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/server"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -44,70 +46,123 @@ var (
 	pool_client_writeback_dir = pool_client_command.Flag(
 		"writeback_dir", "The directory to store all writebacks.").Default(".").
 		ExistingDir()
+
+	pool_client_concurrency = pool_client_command.Flag(
+		"concurrency", "How many real queries to run.").Default("10").Int()
 )
 
+type counter struct {
+	i  int
+	mu sync.Mutex
+}
+
+func (self *counter) Inc() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	self.i++
+
+	if self.i%100 == 0 {
+		fmt.Printf("Starting %v clients\n", self.i)
+	}
+
+}
+
 func doPoolClient() {
-	client_config, err := DefaultConfigLoader.WithRequiredClient().LoadAndValidate()
-	kingpin.FatalIfError(err, "Unable to load config file")
-
-	server.IncreaseLimits(client_config)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	number_of_clients := *pool_client_number
 	if number_of_clients <= 0 {
 		number_of_clients = 2
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client_config, err := DefaultConfigLoader.
+		WithRequiredClient().
+		WithVerbose(*verbose_flag).
+		LoadAndValidate()
+	kingpin.FatalIfError(err, "Unable to load config file")
+
+	sm, err := startEssentialServices(client_config)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
+
+	server.IncreaseLimits(client_config)
+
+	// Make a copy of all the configs for each client.
+	configs := make([]*config_proto.Config, 0, number_of_clients)
+	serialized, _ := json.Marshal(client_config)
+
 	for i := 0; i < number_of_clients; i++ {
-		client_config, err := DefaultConfigLoader.LoadAndValidate()
-		kingpin.FatalIfError(err, "Unable to load config file")
+		client_config := &config_proto.Config{}
+		err := json.Unmarshal(serialized, &client_config)
+		kingpin.FatalIfError(err, "Copying configs.")
+		configs = append(configs, client_config)
+	}
 
-		client_config.Client.WritebackLinux = path.Join(
-			*pool_client_writeback_dir,
-			fmt.Sprintf("pool_client.yaml.%d", i))
+	c := counter{}
 
-		client_config.Client.WritebackWindows = client_config.Client.WritebackLinux
+	for i := 0; i < number_of_clients; i++ {
+		go func(i int) {
+			client_config := configs[i]
+			filename := fmt.Sprintf("pool_client.yaml.%d", i)
+			client_config.Client.WritebackLinux = path.Join(
+				*pool_client_writeback_dir, filename)
 
-		existing_writeback := &config_proto.Writeback{}
-		data, err := ioutil.ReadFile(config.WritebackLocation(client_config))
+			client_config.Client.WritebackWindows = client_config.Client.WritebackLinux
+			if client_config.Client.LocalBuffer != nil {
+				client_config.Client.LocalBuffer.DiskSize = 0
+			}
+			client_config.Client.Concurrency = uint64(*pool_client_concurrency)
 
-		// Failing to read the file is not an error - the file may not
-		// exist yet.
-		if err == nil {
-			err = yaml.Unmarshal(data, existing_writeback)
-			kingpin.FatalIfError(err, "Unable to load config file")
-		}
+			existing_writeback := &config_proto.Writeback{}
+			writeback, err := config.WritebackLocation(client_config)
+			kingpin.FatalIfError(err, "Unable to load writeback file")
 
-		// Merge the writeback with the config.
-		client_config.Writeback = existing_writeback
+			data, err := ioutil.ReadFile(writeback)
 
-		// Make sure the config is ok.
-		err = crypto.VerifyConfig(client_config)
-		if err != nil {
-			kingpin.FatalIfError(err, "Invalid config")
-		}
+			// Failing to read the file is not an error - the file may not
+			// exist yet.
+			if err == nil || len(data) == 0 {
+				err = yaml.Unmarshal(data, existing_writeback)
+				if err != nil {
+					fmt.Printf("Unable to load config file %v: %v", filename, err)
+					existing_writeback = &config_proto.Writeback{}
+				}
+			}
 
-		manager, err := crypto.NewClientCryptoManager(
-			client_config, []byte(client_config.Writeback.PrivateKey))
-		kingpin.FatalIfError(err, "Unable to parse config file")
+			// Merge the writeback with the config.
+			client_config.Writeback = existing_writeback
 
-		exe, err := executor.NewClientExecutor(ctx, client_config)
-		kingpin.FatalIfError(err, "Can not create executor.")
+			// Force new events to be read from the server
+			client_config.Writeback.EventQueries = nil
 
-		comm, err := http_comms.NewHTTPCommunicator(
-			client_config,
-			manager,
-			exe,
-			client_config.Client.ServerUrls,
-			nil,
-			utils.RealClock{},
-		)
-		kingpin.FatalIfError(err, "Can not create HTTPCommunicator.")
+			// Make sure the config is ok.
+			err = crypto.VerifyConfig(client_config)
+			if err != nil {
+				kingpin.FatalIfError(err, "Invalid config")
+			}
 
-		// Run the client in the background.
-		go comm.Run(ctx)
+			manager, err := crypto.NewClientCryptoManager(
+				client_config, []byte(client_config.Writeback.PrivateKey))
+			kingpin.FatalIfError(err, "Unable to parse config file")
+
+			exe, err := executor.NewPoolClientExecutor(ctx, client_config, i)
+			kingpin.FatalIfError(err, "Can not create executor.")
+
+			comm, err := http_comms.NewHTTPCommunicator(
+				client_config,
+				manager,
+				exe,
+				client_config.Client.ServerUrls,
+				nil,
+				utils.RealClock{},
+			)
+			kingpin.FatalIfError(err, "Can not create HTTPCommunicator.")
+
+			c.Inc()
+			// Run the client in the background.
+			comm.Run(ctx)
+		}(i)
 	}
 
 	// Block forever.

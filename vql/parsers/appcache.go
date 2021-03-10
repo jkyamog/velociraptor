@@ -17,7 +17,7 @@ type AppCompatCache struct{}
 
 func (self AppCompatCache) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -31,14 +31,19 @@ func (self AppCompatCache) Call(
 		}
 
 		for _, item := range appcompatcache.ParseValueData([]byte(arg.Value)) {
-			output_chan <- item
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- item:
+			}
 		}
 
 	}()
 	return output_chan
 }
 
-func (self AppCompatCache) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self AppCompatCache) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "appcompatcache",
 		Doc:     "Parses the appcompatcache.",

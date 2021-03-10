@@ -19,7 +19,6 @@ package common
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
@@ -38,7 +37,7 @@ type ClockPlugin struct{}
 
 func (self ClockPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -67,12 +66,11 @@ func (self ClockPlugin) Call(
 			}
 
 			// Wait for start condition.
-			fmt.Printf("Starting at %v\n", start)
 			select {
 			case <-ctx.Done():
 				return
 
-			case <-time.After(start.Sub(time.Now())):
+			case <-time.After(time.Until(start)):
 				output_chan <- time.Now()
 			}
 		}
@@ -92,7 +90,7 @@ func (self ClockPlugin) Call(
 	return output_chan
 }
 
-func (self ClockPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ClockPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "clock",
 		Doc: "Generate a timestamp periodically. This is mostly " +

@@ -3,7 +3,8 @@
 package tools
 
 import (
-	"io"
+	"crypto/tls"
+	"net/http"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/aws/aws-sdk-go/aws"
@@ -25,12 +26,14 @@ type S3UploadArgs struct {
 	Region            string `vfilter:"required,field=region,doc=The region the bucket is in"`
 	CredentialsKey    string `vfilter:"required,field=credentialskey,doc=The AWS key credentials to use"`
 	CredentialsSecret string `vfilter:"required,field=credentialssecret,doc=The AWS secret credentials to use"`
+	Endpoint          string `vfilter:"optional,field=endpoint,doc=The Endpoint to use"`
+	NoVerifyCert      bool   `vfilter:"optional,field=noverifycert,doc=Skip TLS Verification"`
 }
 
 type S3UploadFunction struct{}
 
 func (self *S3UploadFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &S3UploadArgs{}
@@ -71,18 +74,21 @@ func (self *S3UploadFunction) Call(ctx context.Context,
 	} else if !stat.IsDir() {
 		// Abort uploading when the scope is destroyed.
 		sub_ctx, cancel := context.WithCancel(ctx)
-		scope.AddDestructor(func() {
-			// Cancel the s3 upload when the scope destroys.
-			cancel()
-		})
-
+		// Cancel the s3 upload when the scope destroys.
+		_ = scope.AddDestructor(cancel)
 		upload_response, err := upload_S3(
 			sub_ctx, scope, file,
 			arg.Bucket,
-			arg.Name, arg.CredentialsKey, arg.CredentialsSecret, arg.Region)
+			arg.Name,
+			arg.CredentialsKey,
+			arg.CredentialsSecret,
+			arg.Region,
+			arg.Endpoint,
+			arg.NoVerifyCert)
 		if err != nil {
 			scope.Log("upload_S3: %v", err)
-			return vfilter.Null{}
+			// Relay the error in the UploadResponse
+			return upload_response
 		}
 		return upload_response
 	}
@@ -90,10 +96,14 @@ func (self *S3UploadFunction) Call(ctx context.Context,
 	return vfilter.Null{}
 }
 
-func upload_S3(ctx context.Context, scope *vfilter.Scope,
-	reader io.Reader,
+func upload_S3(ctx context.Context, scope vfilter.Scope,
+	reader glob.ReadSeekCloser,
 	bucket, name string,
-	credentialsKey string, credentialsSecret string, region string) (
+	credentialsKey string,
+	credentialsSecret string,
+	region string,
+	endpoint string,
+	NoVerifyCert bool) (
 	*api.UploadResponse, error) {
 
 	scope.Log("upload_S3: Uploading %v to %v", name, bucket)
@@ -108,7 +118,26 @@ func upload_S3(ctx context.Context, scope *vfilter.Scope,
 	}
 
 	conf := aws.NewConfig().WithRegion(region).WithCredentials(creds)
-	sess := session.New(conf)
+	if endpoint != "" {
+		conf = conf.WithEndpoint(endpoint).WithS3ForcePathStyle(true)
+		if NoVerifyCert {
+			tr := &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			}
+
+			client := &http.Client{Transport: tr}
+
+			conf = conf.WithHTTPClient(client)
+		}
+
+	}
+	sess, err := session.NewSession(conf)
+	if err != nil {
+		return &api.UploadResponse{
+			Error: err.Error(),
+		}, err
+	}
+
 	uploader := s3manager.NewUploader(sess)
 
 	result, err := uploader.UploadWithContext(
@@ -123,13 +152,21 @@ func upload_S3(ctx context.Context, scope *vfilter.Scope,
 		}, err
 	}
 
-	return &api.UploadResponse{
+	// All good! report the outcome.
+	response := &api.UploadResponse{
 		Path: result.Location,
-	}, nil
+	}
+
+	stat, err := reader.Stat()
+	if err == nil {
+		response.Size = uint64(stat.Size())
+	}
+
+	return response, nil
 }
 
 func (self S3UploadFunction) Info(
-	scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "upload_s3",
 		Doc:     "Upload files to S3.",

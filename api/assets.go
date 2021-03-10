@@ -1,5 +1,3 @@
-// +build release
-
 /*
    Velociraptor - Hunting Evil
    Copyright (C) 2019 Velocidex Innovations.
@@ -28,21 +26,27 @@ import (
 
 	"github.com/gorilla/csrf"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/gui/assets"
+	gui_assets "www.velocidex.com/golang/velociraptor/gui/velociraptor"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 func install_static_assets(config_obj *config_proto.Config, mux *http.ServeMux) {
-	dir := "/static/"
-	mux.Handle(dir, http.FileServer(assets.HTTP))
+	base := ""
+	if config_obj.GUI != nil {
+		base = config_obj.GUI.BasePath
+	}
+	dir := base + "/app/"
+	mux.Handle(dir, http.StripPrefix(dir, http.FileServer(gui_assets.HTTP)))
 	mux.Handle("/favicon.png",
-		http.RedirectHandler("/static/images/favicon.ico",
+		http.RedirectHandler(base+"/static/images/favicon.ico",
 			http.StatusMovedPermanently))
 }
 
 func GetTemplateHandler(
 	config_obj *config_proto.Config, template_name string) (http.Handler, error) {
-	data, err := assets.ReadFile(template_name)
+	data, err := gui_assets.ReadFile(template_name)
 	if err != nil {
+		utils.Debug(err)
 		return nil, err
 	}
 
@@ -51,10 +55,13 @@ func GetTemplateHandler(
 		return nil, err
 	}
 
+	base := config_obj.GUI.BasePath
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		args := _templateArgs{
 			Timestamp: time.Now().UTC().UnixNano() / 1000,
 			CsrfToken: csrf.Token(r),
+			BasePath:  base,
 			Heading:   "Heading",
 		}
 		err := tmpl.Execute(w, args)

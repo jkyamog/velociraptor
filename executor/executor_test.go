@@ -45,7 +45,7 @@ func (self *ExecutorTestSuite) TestCancellation() {
 
 	// Send cancel message
 	flow_id := "F.XXX"
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 100; i++ {
 		executor.Inbound <- &crypto_proto.GrrMessage{
 			AuthState: crypto_proto.GrrMessage_AUTHENTICATED,
 			SessionId: flow_id,
@@ -58,7 +58,7 @@ func (self *ExecutorTestSuite) TestCancellation() {
 
 	wg.Wait()
 
-	// The cancel message should generate a log + a status
+	// The cancel message should generate 1 log + a status
 	// message. This should only be done once, no matter how many
 	// cancellations are sent.
 	require.Equal(t, len(received_messages), 2)

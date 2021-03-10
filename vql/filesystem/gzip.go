@@ -96,6 +96,10 @@ func (self *GzipFileInfo) Mtime() utils.TimeVal {
 	return self._modtime
 }
 
+func (self *GzipFileInfo) Btime() utils.TimeVal {
+	return self._modtime
+}
+
 func (self *GzipFileInfo) Ctime() utils.TimeVal {
 	return self._modtime
 }
@@ -114,7 +118,7 @@ func (self *GzipFileInfo) GetLink() (string, error) {
 }
 
 type GzipFileSystemAccessor struct {
-	scope  *vfilter.Scope
+	scope  vfilter.Scope
 	getter FileGetter
 }
 
@@ -179,7 +183,7 @@ func (self *GzipFileSystemAccessor) ReadDir(file_path string) ([]glob.FileInfo, 
 	return nil, nil
 }
 
-func (self GzipFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+func (self GzipFileSystemAccessor) New(scope vfilter.Scope) (glob.FileSystemAccessor, error) {
 	return &GzipFileSystemAccessor{
 		scope: scope, getter: self.getter}, nil
 }
@@ -220,10 +224,10 @@ func (self *SeekableGzip) Stat() (os.FileInfo, error) {
 }
 
 // Any getter that implements this can be used
-type FileGetter func(file_path string, scope *vfilter.Scope) (
+type FileGetter func(file_path string, scope vfilter.Scope) (
 	*SeekableGzip, error)
 
-func GetBzip2File(file_path string, scope *vfilter.Scope) (*SeekableGzip, error) {
+func GetBzip2File(file_path string, scope vfilter.Scope) (*SeekableGzip, error) {
 	url, err := url.Parse(file_path)
 	if err != nil {
 		return nil, err
@@ -255,7 +259,7 @@ func GetBzip2File(file_path string, scope *vfilter.Scope) (*SeekableGzip, error)
 		}}, nil
 }
 
-func GetGzipFile(file_path string, scope *vfilter.Scope) (*SeekableGzip, error) {
+func GetGzipFile(file_path string, scope vfilter.Scope) (*SeekableGzip, error) {
 	url, err := url.Parse(file_path)
 	if err != nil {
 		return nil, err
@@ -279,7 +283,7 @@ func GetGzipFile(file_path string, scope *vfilter.Scope) (*SeekableGzip, error) 
 	zr, err := gzip.NewReader(fd)
 	if err != nil {
 		// Try to seek the file back
-		_, err = fd.Seek(0, os.SEEK_SET)
+		_, err = fd.Seek(0, io.SeekStart)
 		if err != nil {
 			// If it does not work - reopen the file.
 			fd.Close()

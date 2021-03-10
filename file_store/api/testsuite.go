@@ -1,3 +1,5 @@
+//nolint
+
 package api
 
 import (
@@ -10,7 +12,7 @@ import (
 	"sort"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -96,7 +98,7 @@ func (self *FileStoreTestSuite) TestListChildren() {
 		"/a/b/Bar/Baz",
 		"/a/b/Foo.txt"})
 
-	// Walk non existant directory just returns no results.
+	// Walk non existent directory just returns no results.
 	names = nil
 	err = self.filestore.Walk(filename+"/nonexistant", func(path string, info os.FileInfo, err error) error {
 		names = append(names, path)
@@ -160,8 +162,18 @@ func (self *FileStoreTestSuite) TestFileReadWrite() {
 	assert.Equal(self.T(), n, 11)
 	assert.Equal(self.T(), "EXTRA EXTRA", string(buff[:n]))
 
-	// Seek to middle of first chunk and read some data.
-	_, err = reader.Seek(2, os.SEEK_SET)
+	// Seek to middle of first chunk and read within first chunk.
+	_, err = reader.Seek(2, io.SeekStart)
+	assert.NoError(self.T(), err)
+
+	buff = make([]byte, 2)
+	n, err = reader.Read(buff)
+	assert.NoError(self.T(), err)
+	assert.Equal(self.T(), n, len(buff))
+	assert.Equal(self.T(), "me", string(buff[:n]))
+
+	// Seek to middle of first chunk and read some data across to next chunk.
+	_, err = reader.Seek(2, io.SeekStart)
 	assert.NoError(self.T(), err)
 
 	buff = make([]byte, 6)
@@ -171,7 +183,7 @@ func (self *FileStoreTestSuite) TestFileReadWrite() {
 	assert.Equal(self.T(), "me dat", string(buff[:n]))
 
 	// Seek to no man's land
-	_, err = reader.Seek(200, os.SEEK_SET)
+	_, err = reader.Seek(200, io.SeekStart)
 	assert.NoError(self.T(), err)
 
 	// Reading past the end of file should produce empty data.
@@ -180,12 +192,13 @@ func (self *FileStoreTestSuite) TestFileReadWrite() {
 	assert.Equal(self.T(), n, 0)
 
 	// Seek to the last chunk and read a large buffer.
-	_, err = reader.Seek(25, os.SEEK_SET)
+	_, err = reader.Seek(25, io.SeekStart)
 	assert.NoError(self.T(), err)
 
 	// Reading past the end of file should produce empty data.
 	buff = make([]byte, 1000)
 	n, err = reader.Read(buff)
+	assert.NoError(self.T(), err)
 	assert.Equal(self.T(), n, 4)
 
 	// Reopenning the file should give the right size.
@@ -228,7 +241,8 @@ func (self *QueueManagerTestSuite) TestPush() {
 		ordereddict.NewDict().Set("foo", 1),
 		ordereddict.NewDict().Set("foo", 2)}
 
-	output, cancel := self.manager.Watch(artifact_name)
+	ctx := context.Background()
+	output, cancel := self.manager.Watch(ctx, artifact_name)
 	defer cancel()
 
 	err := self.manager.PushEventRows(

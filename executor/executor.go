@@ -23,9 +23,11 @@ import (
 	"log"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"www.velocidex.com/golang/velociraptor/actions"
 	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/utils"
 
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
@@ -101,24 +103,30 @@ type ClientExecutor struct {
 	config_obj *config_proto.Config
 	in_flight  map[string][]*_FlowContext
 	next_id    int
+
+	concurrency *utils.Concurrency
 }
 
-func (self *ClientExecutor) Cancel(flow_id string, responder *responder.Responder) bool {
-	self.mu.Lock()
-	defer self.mu.Unlock()
-
+func (self *ClientExecutor) Cancel(
+	ctx context.Context, flow_id string, responder *responder.Responder) bool {
 	if Canceller.IsCancelled(flow_id) {
 		return false
 	}
 
+	self.mu.Lock()
 	contexts, ok := self.in_flight[flow_id]
 	if ok {
-		responder.Log("Cancelling %v in flight queries", len(contexts))
+		contexts = contexts[:]
+	}
+	self.mu.Unlock()
+
+	if ok {
+		// Cancel all existing queries.
+		Canceller.Cancel(flow_id)
 		for _, flow_ctx := range contexts {
 			flow_ctx.cancel()
 		}
 
-		Canceller.Cancel(flow_id)
 		return true
 	}
 
@@ -150,6 +158,8 @@ func (self *ClientExecutor) _FlowContext(flow_id string) (context.Context, *_Flo
 }
 
 // _CloseContext removes the flow_context from the in_flight map.
+// Note: There are multiple queries tied to the same flow id but all
+// of them need to be cancelled when the flow is cancelled.
 func (self *ClientExecutor) _CloseContext(flow_context *_FlowContext) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -192,8 +202,18 @@ func (self *ClientExecutor) ReadResponse() <-chan *crypto_proto.GrrMessage {
 	return self.Outbound
 }
 
-func makeErrorResponse(req *crypto_proto.GrrMessage, message string) *crypto_proto.GrrMessage {
-	return &crypto_proto.GrrMessage{
+func makeErrorResponse(output chan *crypto_proto.GrrMessage,
+	req *crypto_proto.GrrMessage, message string) {
+	output <- &crypto_proto.GrrMessage{
+		SessionId: req.SessionId,
+		RequestId: constants.LOG_SINK,
+		LogMessage: &crypto_proto.LogMessage{
+			Message:   message,
+			Timestamp: uint64(time.Now().UTC().UnixNano() / 1000),
+		},
+	}
+
+	output <- &crypto_proto.GrrMessage{
 		SessionId:  req.SessionId,
 		RequestId:  req.RequestId,
 		ResponseId: 1,
@@ -223,7 +243,7 @@ func (self *ClientExecutor) processRequestPlugin(
 	// Never serve unauthenticated requests.
 	if req.AuthState != crypto_proto.GrrMessage_AUTHENTICATED {
 		log.Printf("Unauthenticated")
-		self.Outbound <- makeErrorResponse(
+		makeErrorResponse(self.Outbound,
 			req, fmt.Sprintf("Unauthenticated message received: %v.", req))
 		return
 	}
@@ -234,6 +254,15 @@ func (self *ClientExecutor) processRequestPlugin(
 	responder := responder.NewResponder(config_obj, req, self.Outbound)
 
 	if req.VQLClientAction != nil {
+		// Control concurrency on the executor only.
+		if !req.Urgent {
+			err := self.concurrency.StartConcurrencyControl(ctx)
+			if err != nil {
+				responder.RaiseError(ctx, fmt.Sprintf("%v", err))
+				return
+			}
+			defer self.concurrency.EndConcurrencyControl()
+		}
 		actions.VQLClientAction{}.StartQuery(
 			config_obj, ctx, responder, req.VQLClientAction)
 		return
@@ -253,26 +282,33 @@ func (self *ClientExecutor) processRequestPlugin(
 
 	if req.Cancel != nil {
 		// Only log when the flow is not already cancelled.
-		if self.Cancel(req.SessionId, responder) {
-			self.Outbound <- makeErrorResponse(
-				req, fmt.Sprintf("Cancelled all inflight queries: %v",
+		if self.Cancel(ctx, req.SessionId, responder) {
+			makeErrorResponse(self.Outbound,
+				req, fmt.Sprintf("Cancelled all inflight queries for flow %v",
 					req.SessionId))
 		}
 		return
 	}
 
-	self.Outbound <- makeErrorResponse(
+	makeErrorResponse(self.Outbound,
 		req, fmt.Sprintf("Unsupported payload for message: %v", req))
 }
 
 func NewClientExecutor(
 	ctx context.Context,
 	config_obj *config_proto.Config) (*ClientExecutor, error) {
+
+	level := int(config_obj.Client.Concurrency)
+	if level == 0 {
+		level = 2
+	}
+
 	result := &ClientExecutor{
-		Inbound:    make(chan *crypto_proto.GrrMessage),
-		Outbound:   make(chan *crypto_proto.GrrMessage),
-		in_flight:  make(map[string][]*_FlowContext),
-		config_obj: config_obj,
+		Inbound:     make(chan *crypto_proto.GrrMessage, 10),
+		Outbound:    make(chan *crypto_proto.GrrMessage, 10),
+		in_flight:   make(map[string][]*_FlowContext),
+		config_obj:  config_obj,
+		concurrency: utils.NewConcurrencyControl(level, time.Hour),
 	}
 
 	// Drain messages from server and execute them, pushing

@@ -62,7 +62,7 @@ type _DiffCache struct {
 	done         chan bool
 }
 
-func (self *_DiffCache) Eval(ctx context.Context, scope *vfilter.Scope) []vfilter.Row {
+func (self *_DiffCache) Eval(ctx context.Context, scope vfilter.Scope) []vfilter.Row {
 	result := []vfilter.Row{}
 	old_rows_map := self.rows
 	self.rows = make(map[string][]*ordereddict.Dict)
@@ -129,7 +129,7 @@ check_row:
 
 func NewDiffCache(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	period time.Duration,
 	key string,
 	stored_query vfilter.StoredQuery) *_DiffCache {
@@ -139,9 +139,13 @@ func NewDiffCache(
 		done:         make(chan bool),
 	}
 
-	scope.AddDestructor(func() {
+	err := scope.AddDestructor(func() {
 		close(result.done)
 	})
+	if err != nil {
+		close(result.done)
+		scope.Log("AddDestructor: %s", err)
+	}
 
 	return result
 }
@@ -155,7 +159,7 @@ type _DiffPluginArgs struct {
 type _DiffPlugin struct{}
 
 func (self _DiffPlugin) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -187,7 +191,12 @@ func (self _DiffPlugin) Call(ctx context.Context,
 
 			case <-time.After(time.Duration(arg.Period) * time.Second):
 				for _, row := range diff_cache.Eval(ctx, scope) {
-					output_chan <- row
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- row:
+					}
 				}
 			}
 		}
@@ -197,7 +206,7 @@ func (self _DiffPlugin) Call(ctx context.Context,
 }
 
 func (self _DiffPlugin) Info(
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "diff",

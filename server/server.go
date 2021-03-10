@@ -20,28 +20,20 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/juju/ratelimit"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/crypto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/flows"
-	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
-)
-
-var (
-	concurrencyControl = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "client_comms_concurrency",
-		Help: "The total number of currently executing client recerive operations",
-	})
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type Server struct {
@@ -51,32 +43,22 @@ type Server struct {
 	db      datastore.DataStore
 
 	// Limit concurrency for processing messages.
-	concurrency chan bool
+	concurrency *utils.Concurrency
+	throttler   *utils.Throttler
 
-	Bucket           *ratelimit.Bucket
-	APIClientFactory grpc_client.APIClientFactory
-
+	Bucket  *ratelimit.Bucket
 	Healthy int32
-}
-
-func (self *Server) StartConcurrencyControl() {
-	// Wait here until we have enough room in the concurrency
-	// channel.
-	self.concurrency <- true
-	concurrencyControl.Inc()
-}
-
-func (self *Server) EndConcurrencyControl() {
-	<-self.concurrency
-	concurrencyControl.Dec()
 }
 
 func (self *Server) Close() {
 	self.db.Close()
 }
 
-func NewServer(
-	config_obj *config_proto.Config) (*Server, error) {
+func NewServer(config_obj *config_proto.Config) (*Server, error) {
+	if config_obj.Frontend == nil {
+		return nil, errors.New("Frontend not configured")
+	}
+
 	manager, err := crypto.NewServerCryptoManager(config_obj)
 	if err != nil {
 		return nil, err
@@ -89,10 +71,10 @@ func NewServer(
 
 	// This number mainly affects memory use during large tranfers
 	// as it controls the number of concurrent clients that may be
-	// tranferring data (each will use some memory to buffer).
-	concurrency := config_obj.Frontend.Concurrency
+	// transferring data (each will use some memory to buffer).
+	concurrency := int(config_obj.Frontend.Resources.Concurrency)
 	if concurrency == 0 {
-		concurrency = 6
+		concurrency = 20
 	}
 
 	result := Server{
@@ -101,15 +83,15 @@ func NewServer(
 		db:      db,
 		logger: logging.GetLogger(config_obj,
 			&logging.FrontendComponent),
-		concurrency:      make(chan bool, concurrency),
-		APIClientFactory: grpc_client.GRPCAPIClient{},
+		concurrency: utils.NewConcurrencyControl(concurrency, 60*time.Second),
+		throttler:   utils.NewThrottler(config_obj.Frontend.Resources.ConnectionsPerSecond),
 	}
 
-	if config_obj.Frontend.GlobalUploadRate > 0 {
+	if config_obj.Frontend.Resources.GlobalUploadRate > 0 {
 		result.logger.Info("Global upload rate set to %v bytes per second",
-			config_obj.Frontend.GlobalUploadRate)
+			config_obj.Frontend.Resources.GlobalUploadRate)
 		result.Bucket = ratelimit.NewBucketWithRate(
-			float64(config_obj.Frontend.GlobalUploadRate),
+			float64(config_obj.Frontend.Resources.GlobalUploadRate),
 			1024*1024)
 	}
 
@@ -122,7 +104,7 @@ func (self *Server) ProcessSingleUnauthenticatedMessage(
 	ctx context.Context,
 	message *crypto_proto.GrrMessage) {
 	if message.CSR != nil {
-		err := enroll(ctx, self, message.CSR)
+		err := enroll(ctx, self.config, self, message.CSR)
 		if err != nil {
 			self.logger.Error(fmt.Sprintf("Enrol Error: %s", err))
 		}
@@ -203,7 +185,7 @@ func (self *Server) DrainRequestsForClient(client_id string) []*crypto_proto.Grr
 }
 
 func (self *Server) Error(msg string, err error) {
-	self.logger.Error(msg, err)
+	self.logger.Error(fmt.Sprintf(msg, err))
 }
 
 func (self *Server) Info(format string, v ...interface{}) {

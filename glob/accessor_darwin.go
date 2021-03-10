@@ -28,9 +28,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
+)
+
+var (
+	fileAccessorCurrentOpened = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "accessor_file_current_open",
+		Help: "Number of currently opened files with the file accessor.",
+	})
 )
 
 type OSFileInfo struct {
@@ -42,25 +51,40 @@ func (self *OSFileInfo) FullPath() string {
 	return self._full_path
 }
 
-func (self *OSFileInfo) Mtime() utils.TimeVal {
+func (self *OSFileInfo) Btime() utils.TimeVal {
+	ts := self.sys().Birthtimespec
 	return utils.TimeVal{
-		Sec:  int64(self.sys().Mtimespec.Sec),
-		Nsec: int64(self.sys().Mtimespec.Nsec),
+		Sec:  ts.Sec,
+		Nsec: ts.Nsec + ts.Sec*1000000000,
+	}
+}
+
+func (self *OSFileInfo) Mtime() utils.TimeVal {
+	ts := self.sys().Mtimespec
+	return utils.TimeVal{
+		Sec:  ts.Sec,
+		Nsec: ts.Nsec + ts.Sec*1000000000,
 	}
 }
 
 func (self *OSFileInfo) Ctime() utils.TimeVal {
+	ts := self.sys().Ctimespec
 	return utils.TimeVal{
-		Sec:  int64(self.sys().Ctimespec.Sec),
-		Nsec: int64(self.sys().Ctimespec.Nsec),
+		Sec:  ts.Sec,
+		Nsec: ts.Nsec + ts.Sec*1000000000,
 	}
 }
 
 func (self *OSFileInfo) Atime() utils.TimeVal {
+	ts := self.sys().Atimespec
 	return utils.TimeVal{
-		Sec:  int64(self.sys().Atimespec.Sec),
-		Nsec: int64(self.sys().Atimespec.Nsec),
+		Sec:  ts.Sec,
+		Nsec: ts.Nsec + ts.Sec*1000000000,
 	}
+}
+
+func (self *OSFileInfo) _Sys() *syscall.Stat_t {
+	return self.sys()
 }
 
 func (self *OSFileInfo) Data() interface{} {
@@ -116,7 +140,7 @@ func (u *OSFileInfo) UnmarshalJSON(data []byte) error {
 // Real implementation for non windows OSs:
 type OSFileSystemAccessor struct{}
 
-func (self OSFileSystemAccessor) New(scope *vfilter.Scope) (FileSystemAccessor, error) {
+func (self OSFileSystemAccessor) New(scope vfilter.Scope) (FileSystemAccessor, error) {
 	result := &OSFileSystemAccessor{}
 	return result, nil
 }

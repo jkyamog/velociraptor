@@ -33,6 +33,7 @@ import (
 	utils "www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/protocols"
 )
 
 type ParseJsonFunctionArg struct {
@@ -40,7 +41,7 @@ type ParseJsonFunctionArg struct {
 }
 type ParseJsonFunction struct{}
 
-func (self ParseJsonFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self ParseJsonFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "parse_json",
 		Doc:     "Parse a JSON string into an object.",
@@ -49,7 +50,7 @@ func (self ParseJsonFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeM
 }
 
 func (self ParseJsonFunction) Call(
-	ctx context.Context, scope *vfilter.Scope,
+	ctx context.Context, scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &ParseJsonFunctionArg{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -69,7 +70,7 @@ func (self ParseJsonFunction) Call(
 
 type ParseJsonArray struct{}
 
-func (self ParseJsonArray) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self ParseJsonArray) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "parse_json_array",
 		Doc:     "Parse a JSON string into an array.",
@@ -78,7 +79,7 @@ func (self ParseJsonArray) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap)
 }
 
 func (self ParseJsonArray) Call(
-	ctx context.Context, scope *vfilter.Scope,
+	ctx context.Context, scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &ParseJsonFunctionArg{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -126,7 +127,7 @@ type ParseJsonlPlugin struct{}
 
 func (self ParseJsonlPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -177,7 +178,12 @@ func (self ParseJsonlPlugin) Call(
 					return
 				}
 
-				output_chan <- item
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- item:
+				}
 			}
 		}
 	}()
@@ -185,7 +191,7 @@ func (self ParseJsonlPlugin) Call(
 	return output_chan
 }
 
-func (self ParseJsonlPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ParseJsonlPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "parse_jsonl",
 		Doc:     "Parses a line oriented json file.",
@@ -197,7 +203,7 @@ type ParseJsonArrayPlugin struct{}
 
 func (self ParseJsonArrayPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -209,7 +215,12 @@ func (self ParseJsonArrayPlugin) Call(
 		result_type := result_value.Type()
 		if result_type.Kind() == reflect.Slice {
 			for i := 0; i < result_value.Len(); i++ {
-				output_chan <- result_value.Index(i).Interface()
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- result_value.Index(i).Interface():
+				}
 			}
 		}
 
@@ -218,7 +229,7 @@ func (self ParseJsonArrayPlugin) Call(
 	return output_chan
 }
 
-func (self ParseJsonArrayPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ParseJsonArrayPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "parse_json_array",
 		Doc:     "Parses events from a line oriented json file.",
@@ -232,7 +243,11 @@ type _MapInterfaceAssociativeProtocol struct{}
 func (self _MapInterfaceAssociativeProtocol) Applicable(
 	a vfilter.Any, b vfilter.Any) bool {
 
-	if reflect.TypeOf(a).Kind() != reflect.Map {
+	a_type := reflect.TypeOf(a)
+	if a_type == nil {
+		return false
+	}
+	if a_type.Kind() != reflect.Map {
 		return false
 	}
 
@@ -241,7 +256,7 @@ func (self _MapInterfaceAssociativeProtocol) Applicable(
 }
 
 func (self _MapInterfaceAssociativeProtocol) Associative(
-	scope *vfilter.Scope, a vfilter.Any, b vfilter.Any) (
+	scope vfilter.Scope, a vfilter.Any, b vfilter.Any) (
 	vfilter.Any, bool) {
 
 	key, key_ok := b.(string)
@@ -264,7 +279,7 @@ func (self _MapInterfaceAssociativeProtocol) Associative(
 }
 
 func (self _MapInterfaceAssociativeProtocol) GetMembers(
-	scope *vfilter.Scope, a vfilter.Any) []string {
+	scope vfilter.Scope, a vfilter.Any) []string {
 	result := []string{}
 	a_map, ok := a.(map[string]interface{})
 	if ok {
@@ -307,7 +322,7 @@ func (self _ProtobufAssociativeProtocol) Applicable(
 // Accept either the json emitted field name or the go style field
 // name.
 func (self _ProtobufAssociativeProtocol) Associative(
-	scope *vfilter.Scope, a vfilter.Any, b vfilter.Any) (
+	scope vfilter.Scope, a vfilter.Any, b vfilter.Any) (
 	vfilter.Any, bool) {
 
 	field, b_ok := b.(string)
@@ -329,7 +344,7 @@ func (self _ProtobufAssociativeProtocol) Associative(
 
 	for _, item := range properties.Prop {
 		if field == item.OrigName || field == item.Name {
-			result, pres := vfilter.DefaultAssociative{}.Associative(
+			result, pres := protocols.DefaultAssociative{}.Associative(
 				scope, a, item.Name)
 
 			// If the result is an any, we decode that
@@ -355,7 +370,7 @@ func (self _ProtobufAssociativeProtocol) Associative(
 // consistent with the same protobuf emitted as json using other
 // means.
 func (self _ProtobufAssociativeProtocol) GetMembers(
-	scope *vfilter.Scope, a vfilter.Any) []string {
+	scope vfilter.Scope, a vfilter.Any) []string {
 	result := []string{}
 
 	a_value := reflect.Indirect(reflect.ValueOf(a))
@@ -386,14 +401,14 @@ func (self _nilAssociativeProtocol) Applicable(
 }
 
 func (self _nilAssociativeProtocol) Associative(
-	scope *vfilter.Scope, a vfilter.Any, b vfilter.Any) (
+	scope vfilter.Scope, a vfilter.Any, b vfilter.Any) (
 	vfilter.Any, bool) {
 
 	return vfilter.Null{}, false
 }
 
 func (self _nilAssociativeProtocol) GetMembers(
-	scope *vfilter.Scope, a vfilter.Any) []string {
+	scope vfilter.Scope, a vfilter.Any) []string {
 	return []string{}
 }
 
@@ -402,7 +417,6 @@ type _IndexAssociativeProtocol struct{}
 
 func (self _IndexAssociativeProtocol) Applicable(
 	a vfilter.Any, b vfilter.Any) bool {
-
 	a_value := reflect.Indirect(reflect.ValueOf(a))
 	a_type := a_value.Type()
 	if a_type.Kind() != reflect.Slice {
@@ -415,15 +429,19 @@ func (self _IndexAssociativeProtocol) Applicable(
 		if err == nil {
 			return true
 		}
-	case int, float64, uint64:
+	case int, float64, uint64, int64, *int, *float64, *uint64, *int64:
 		return true
 	}
 	return false
 }
 
 func (self _IndexAssociativeProtocol) Associative(
-	scope *vfilter.Scope, a vfilter.Any, b vfilter.Any) (
+	scope vfilter.Scope, a vfilter.Any, b vfilter.Any) (
 	vfilter.Any, bool) {
+
+	if b == nil {
+		return vfilter.Null{}, false
+	}
 
 	idx := 0
 	switch t := b.(type) {
@@ -435,6 +453,16 @@ func (self _IndexAssociativeProtocol) Associative(
 		idx = int(t)
 	case uint64:
 		idx = int(t)
+	case int64:
+		idx = int(t)
+	case *int:
+		idx = int(*t)
+	case *float64:
+		idx = int(*t)
+	case *uint64:
+		idx = int(*t)
+	case *int64:
+		idx = int(*t)
 
 	default:
 		return vfilter.Null{}, false
@@ -445,13 +473,18 @@ func (self _IndexAssociativeProtocol) Associative(
 		return vfilter.Null{}, false
 	}
 
-	idx = idx % a_value.Len()
-
+	// Modulus for negative numbers should wrap around the length
+	// of the array aka python style modulus
+	// (http://python-history.blogspot.com/2010/08/why-pythons-integer-division-floors.html).
+	// This way indexing negative indexes will count from the back
+	// of the array.
+	length := a_value.Len()
+	idx = (idx%length + length) % length
 	return a_value.Index(idx).Interface(), true
 }
 
 func (self _IndexAssociativeProtocol) GetMembers(
-	scope *vfilter.Scope, a vfilter.Any) []string {
+	scope vfilter.Scope, a vfilter.Any) []string {
 	return []string{}
 }
 

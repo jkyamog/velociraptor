@@ -30,6 +30,7 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -231,6 +232,7 @@ func (self *MysqlQueueManager) PushEventRows(
 		return nil
 	}
 
+	// FIXME: Support indexes on result sets for indexed reading/writing.
 	fd, err := self.file_store.WriteFile(log_path)
 	if err != nil {
 		return err
@@ -241,7 +243,8 @@ func (self *MysqlQueueManager) PushEventRows(
 	return err
 }
 
-func (self *MysqlQueueManager) Watch(queue_name string) (<-chan *ordereddict.Dict, func()) {
+func (self *MysqlQueueManager) Watch(
+	ctx context.Context, queue_name string) (<-chan *ordereddict.Dict, func()) {
 	return pool.Register(queue_name)
 }
 

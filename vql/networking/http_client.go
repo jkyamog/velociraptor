@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -33,7 +34,6 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/tink-ab/tempfile"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -41,6 +41,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 var (
@@ -55,8 +56,9 @@ var (
 type _HttpPluginRequest struct {
 	Url     string      `vfilter:"required,field=url,doc=The URL to fetch"`
 	Params  vfilter.Any `vfilter:"optional,field=params,doc=Parameters to encode as POST or GET query strings"`
-	Headers vfilter.Any `vfilter:"optional,field=headers.doc=A dict of headers to send."`
+	Headers vfilter.Any `vfilter:"optional,field=headers,doc=A dict of headers to send."`
 	Method  string      `vfilter:"optional,field=method,doc=HTTP method to use (GET, POST)"`
+	Data    string      `vfilter:"optional,field=data,doc=If specified we write this raw data into a POST request instead of encoding the params above."`
 	Chunk   int         `vfilter:"optional,field=chunk_size,doc=Read input with this chunk size and send each chunk as a row"`
 
 	// Sometimes it is useful to be able to query misconfigured hosts.
@@ -205,7 +207,7 @@ func getHttpClient(
 	return http_client
 }
 
-func encodeParams(arg *_HttpPluginRequest, scope *vfilter.Scope) *url.Values {
+func encodeParams(arg *_HttpPluginRequest, scope vfilter.Scope) *url.Values {
 	data := url.Values{}
 	if arg.Params != nil {
 		for _, member := range scope.GetMembers(arg.Params) {
@@ -236,7 +238,7 @@ func encodeParams(arg *_HttpPluginRequest, scope *vfilter.Scope) *url.Values {
 
 func (self *_HttpPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &_HttpPluginRequest{}
@@ -266,22 +268,40 @@ func (self *_HttpPlugin) Call(
 
 		params := encodeParams(arg, scope)
 		client := getHttpClient(config_obj, arg)
-		req, err := http.NewRequest(
-			arg.Method, arg.Url,
-			strings.NewReader(params.Encode()))
+
+		data := arg.Data
+		if data == "" {
+			data = params.Encode()
+		}
+
+		req, err := http.NewRequestWithContext(
+			ctx, arg.Method, arg.Url, strings.NewReader(data))
 		if err != nil {
 			scope.Log("%s: %s", self.Name(), err.Error())
 			return
 		}
 
-		// Incorporate the context into the request so it can
-		// be timed out properly when the VQL query is
-		// aborted.
-		req = req.WithContext(ctx)
-
 		scope.Log("Fetching %v\n", arg.Url)
 
 		req.Header.Set("User-Agent", constants.USER_AGENT)
+
+		// Set various headers
+		if arg.Headers != nil {
+			for _, member := range scope.GetMembers(arg.Headers) {
+				value, pres := scope.Associative(arg.Headers, member)
+				if pres {
+					lazy_v, ok := value.(types.LazyExpr)
+					if ok {
+						value = lazy_v.Reduce()
+					}
+
+					str_value, ok := value.(string)
+					if ok {
+						req.Header.Set(member, str_value)
+					}
+				}
+			}
+		}
 
 		http_resp, err := client.Do(req)
 		if http_resp != nil {
@@ -291,11 +311,13 @@ func (self *_HttpPlugin) Call(
 		if err != nil {
 			scope.Log("http_client: Error %v while fetching %v",
 				err, arg.Url)
-
-			output_chan <- &_HttpPluginResponse{
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- &_HttpPluginResponse{
 				Url:      arg.Url,
 				Response: 500,
-				Content:  err.Error(),
+				Content:  err.Error()}:
 			}
 			return
 		}
@@ -307,25 +329,30 @@ func (self *_HttpPlugin) Call(
 
 		if arg.TempfileExtension != "" {
 
-			tmpfile, err := tempfile.TempFile("", "tmp", arg.TempfileExtension)
+			tmpfile, err := ioutil.TempFile("", "tmp*"+arg.TempfileExtension)
 			if err != nil {
 				scope.Log("http_client: %v", err)
 				return
 			}
 
+			remove := func() {
+				remove_tmpfile(tmpfile.Name(), scope)
+			}
 			if arg.RemoveLast {
-				root_any, pres := scope.Resolve(constants.SCOPE_ROOT)
-				if pres {
-					root, ok := root_any.(*vfilter.Scope)
-					if ok {
-						scope.Log("Adding global destructor for %v", tmpfile.Name())
-						root.AddDestructor(func() {
-							remove_tmpfile(tmpfile.Name(), scope)
-						})
-					}
+				scope.Log("Adding global destructor for %v", tmpfile.Name())
+				err := vql_subsystem.GetRootScope(scope).AddDestructor(remove)
+				if err != nil {
+					remove()
+					scope.Log("http_client: %v", err)
+					return
 				}
 			} else {
-				scope.AddDestructor(func() { remove_tmpfile(tmpfile.Name(), scope) })
+				err := scope.AddDestructor(remove)
+				if err != nil {
+					remove()
+					scope.Log("http_client: %v", err)
+					return
+				}
 			}
 
 			scope.Log("http_client: Downloading %v into %v",
@@ -341,7 +368,11 @@ func (self *_HttpPlugin) Call(
 			// emit it to the VQL engine.
 			tmpfile.Close()
 
-			output_chan <- response
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- response:
+			}
 
 			return
 		}
@@ -351,7 +382,11 @@ func (self *_HttpPlugin) Call(
 			n, err := io.ReadFull(http_resp.Body, buf)
 			if n > 0 {
 				response.Content = string(buf[:n])
-				output_chan <- response
+				select {
+				case <-ctx.Done():
+					return
+				case output_chan <- response:
+				}
 			}
 
 			if err == io.EOF {
@@ -376,7 +411,7 @@ func (self _HttpPlugin) Name() string {
 	return "http_client"
 }
 
-func (self _HttpPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _HttpPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    self.Name(),
 		Doc:     "Make a http request.",
@@ -385,7 +420,7 @@ func (self _HttpPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *v
 }
 
 // Make sure the file is removed when the query is done.
-func remove_tmpfile(tmpfile string, scope *vfilter.Scope) {
+func remove_tmpfile(tmpfile string, scope vfilter.Scope) {
 	scope.Log("tempfile: removing tempfile %v", tmpfile)
 
 	// On windows especially we can not remove files that

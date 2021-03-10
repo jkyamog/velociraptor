@@ -56,7 +56,6 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -77,7 +76,7 @@ type SearchPlugin struct{}
 
 func (self SearchPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -101,7 +100,7 @@ func (self SearchPlugin) Call(
 			arg.Limit = 10000
 		}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
@@ -114,16 +113,19 @@ func (self SearchPlugin) Call(
 
 		for _, item := range db.SearchClients(
 			config_obj, constants.CLIENT_INDEX_URN,
-			arg.Query, arg.Type, arg.Offset, arg.Limit) {
-
-			output_chan <- ordereddict.NewDict().Set("Hit", item)
+			arg.Query, arg.Type, arg.Offset, arg.Limit, datastore.UNSORTED) {
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- ordereddict.NewDict().Set("Hit", item):
+			}
 		}
 	}()
 
 	return output_chan
 }
 
-func (self SearchPlugin) Info(scope *vfilter.Scope,
+func (self SearchPlugin) Info(scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "search",

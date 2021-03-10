@@ -105,6 +105,10 @@ func (self *RegKeyInfo) Mtime() utils.TimeVal {
 	}
 }
 
+func (self *RegKeyInfo) Btime() utils.TimeVal {
+	return self.Mtime()
+}
+
 func (self *RegKeyInfo) Ctime() utils.TimeVal {
 	return self.Mtime()
 }
@@ -179,7 +183,7 @@ func NewValueBuffer(buf []byte, stat glob.FileInfo) *ValueBuffer {
 
 type RegFileSystemAccessor struct{}
 
-func (self *RegFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+func (self *RegFileSystemAccessor) New(scope vfilter.Scope) (glob.FileSystemAccessor, error) {
 	return self, nil
 }
 

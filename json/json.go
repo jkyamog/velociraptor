@@ -5,11 +5,12 @@ package json
 import (
 	"github.com/Velocidex/json"
 	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/vfilter"
 )
 
 func MarshalJSONDict(v interface{}, opts *json.EncOpts) ([]byte, error) {
 	self, ok := v.(*ordereddict.Dict)
-	if !ok {
+	if !ok || self == nil {
 		return nil, json.EncoderCallbackSkip
 	}
 
@@ -28,6 +29,12 @@ func MarshalJSONDict(v interface{}, opts *json.EncOpts) ([]byte, error) {
 		v, ok := self.Get(k)
 		if !ok {
 			v = "null"
+		}
+
+		// If v is a callable, run it
+		callable, ok := v.(func() vfilter.Any)
+		if ok {
+			v = callable()
 		}
 
 		vBytes, err := json.MarshalWithOptions(v, opts)

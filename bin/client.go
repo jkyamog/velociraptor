@@ -22,10 +22,12 @@ import (
 	"sync"
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
+	"www.velocidex.com/golang/velociraptor/config"
 	"www.velocidex.com/golang/velociraptor/crypto"
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/http_comms"
 	logging "www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -40,7 +42,14 @@ func RunClient(
 	config_path *string) {
 
 	// Include the writeback in the client's configuration.
-	config_obj, err := DefaultConfigLoader.
+	config_obj, err := new(config.Loader).
+		WithVerbose(*verbose_flag).
+		WithFileLoader(*config_path).
+		WithEmbedded().
+		WithEnvLoader("VELOCIRAPTOR_CONFIG").
+		WithCustomValidator(initFilestoreAccessor).
+		WithCustomValidator(initDebugServer).
+		WithLogFile(*logging_flag).
 		WithRequiredClient().
 		WithRequiredLogging().
 		WithWriteback().LoadAndValidate()
@@ -52,17 +61,29 @@ func RunClient(
 		kingpin.FatalIfError(err, "Invalid config")
 	}
 
+	executor.SetTempfile(config_obj)
+
 	manager, err := crypto.NewClientCryptoManager(
 		config_obj, []byte(config_obj.Writeback.PrivateKey))
 	if err != nil {
 		kingpin.FatalIfError(err, "Unable to parse config file")
 	}
 
+	// Start all the services
+	sm := services.NewServiceManager(ctx, config_obj)
+	defer sm.Close()
+
 	exe, err := executor.NewClientExecutor(ctx, config_obj)
 	if err != nil {
 		kingpin.FatalIfError(err, "Can not create executor.")
 	}
 
+	err = executor.StartServices(sm, manager.ClientId, exe)
+	if err != nil {
+		kingpin.FatalIfError(err, "Can not start services.")
+	}
+
+	// Now start the communicator so we can talk with the server.
 	comm, err := http_comms.NewHTTPCommunicator(
 		config_obj,
 		manager,
@@ -86,13 +107,10 @@ func RunClient(
 		<-ctx.Done()
 
 		logger := logging.GetLogger(config_obj, &logging.ClientComponent)
-		logger.Info("Interrupted! Shutting down\n")
+		logger.Info("<cyan>Interrupted!</> Shutting down\n")
 	}()
 
-	// Wait for the comms to properly start before we begin the
-	// services. If services need to communicate with the server
-	// they will deadlock otherwise.
-	executor.StartServices(config_obj, manager.ClientId, exe)
+	wg.Wait()
 }
 
 func init() {
@@ -103,8 +121,6 @@ func init() {
 			defer cancel()
 
 			RunClient(ctx, wg, config_path)
-
-			wg.Wait()
 
 			return true
 		}

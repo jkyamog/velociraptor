@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"reflect"
+	"regexp"
 	"runtime"
 
 	"github.com/Velocidex/survey"
@@ -30,6 +32,16 @@ const (
 
 var (
 	deployment_type = &survey.Select{
+		Options: []string{self_signed, autocert, oauth_sso},
+	}
+
+	sso_type = &survey.Select{
+		Message: "Select the SSO Authentication Provider",
+		Default: "Google",
+		Options: []string{"Google", "GitHub", "Azure", "OIDC"},
+	}
+
+	server_type_question = &survey.Select{
 		Message: `
 Welcome to the Velociraptor configuration generator
 ---------------------------------------------------
@@ -37,18 +49,9 @@ Welcome to the Velociraptor configuration generator
 I will be creating a new deployment configuration for you. I will
 begin by identifying what type of deployment you need.
 
+
+What OS will the server be deployed on?
 `,
-		Options: []string{self_signed, autocert, oauth_sso},
-	}
-
-	sso_type = &survey.Select{
-		Message: "Select the SSO Authentication Provider",
-		Default: "Google",
-		Options: []string{"Google", "GitHub", "Azure"},
-	}
-
-	server_type_question = &survey.Select{
-		Message: "What OS will the server be deployed on?",
 		Default: runtime.GOOS,
 		Options: []string{"linux", "windows", "darwin"},
 	}
@@ -61,10 +64,13 @@ begin by identifying what type of deployment you need.
 		Default: "localhost",
 	}
 
+	// https://docs.microsoft.com/en-us/troubleshoot/windows-server/identity/naming-conventions-for-computer-domain-site-ou#dns-host-names
+	url_validator = regexValidator("^[a-z0-9.A-Z\\-]+$")
 	port_question = &survey.Input{
 		Message: "Enter the frontend port to listen on.",
 		Default: "8000",
 	}
+	port_validator = regexValidator("^[0-9]+$")
 
 	gui_port_question = &survey.Input{
 		Message: "Enter the port for the GUI to listen on.",
@@ -145,6 +151,23 @@ begin by identifying what type of deployment you need.
 	}
 )
 
+func regexValidator(re string) survey.Validator {
+	compiled_re := regexp.MustCompile(re)
+
+	return func(val interface{}) error {
+		s, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("cannot regex on type %v", reflect.TypeOf(val).Name())
+		}
+
+		match := compiled_re.MatchString(s)
+		if !match {
+			return fmt.Errorf("Invalid format")
+		}
+		return nil
+	}
+}
+
 func doGenerateConfigInteractive() {
 	config_obj := config.GetDefaultConfig()
 
@@ -155,13 +178,17 @@ func doGenerateConfigInteractive() {
 			&config_obj.ServerType,
 			survey.WithValidator(survey.Required)), "")
 
+	// For now Mysql datastore is disabled due to performance
+	// issues.
+	config_obj.Datastore.Implementation = filebased_datastore
+
+	/*
+		kingpin.FatalIfError(
+			survey.AskOne(data_store_type,
+				&config_obj.Datastore.Implementation,
+				survey.WithValidator(survey.Required)), "")
+	*/
 	var default_data_store string
-
-	kingpin.FatalIfError(
-		survey.AskOne(data_store_type,
-			&config_obj.Datastore.Implementation,
-			survey.WithValidator(survey.Required)), "")
-
 	if config_obj.Datastore.Implementation == filebased_datastore {
 		switch config_obj.ServerType {
 		case "windows":
@@ -201,12 +228,24 @@ func doGenerateConfigInteractive() {
 	switch install_type {
 	case self_signed:
 		kingpin.FatalIfError(survey.Ask([]*survey.Question{
-			{Name: "BindPort", Prompt: port_question},
-			{Name: "Hostname", Prompt: url_question},
+			{
+				Name:     "Hostname",
+				Prompt:   url_question,
+				Validate: url_validator,
+			},
+			{
+				Name:     "BindPort",
+				Prompt:   port_question,
+				Validate: port_validator,
+			},
 		}, config_obj.Frontend), "")
 
 		kingpin.FatalIfError(survey.Ask([]*survey.Question{
-			{Name: "BindPort", Prompt: gui_port_question},
+			{
+				Name:     "BindPort",
+				Validate: port_validator,
+				Prompt:   gui_port_question,
+			},
 		}, config_obj.GUI), "")
 
 		config_obj.Client.UseSelfSignedSsl = true
@@ -250,6 +289,12 @@ func doGenerateConfigInteractive() {
 		survey.WithValidator(survey.Required)), "")
 
 	config_obj.Logging.SeparateLogsPerComponent = true
+
+	// By default disabled debug logging - it is not useful unless
+	// you are trying to debug something.
+	config_obj.Logging.Debug = &config_proto.LoggingRetentionConfig{
+		Disabled: true,
+	}
 
 	path := ""
 	kingpin.FatalIfError(
@@ -295,6 +340,8 @@ func configureSSO(config_obj *config_proto.Config) {
 		redirect = config_obj.GUI.PublicUrl + "auth/github/callback"
 	case "Azure":
 		redirect = config_obj.GUI.PublicUrl + "auth/azure/callback"
+	case "OIDC":
+		redirect = config_obj.GUI.PublicUrl + "auth/oidc/callback"
 	}
 	fmt.Printf("\nSetting %v configuration will use redirect URL %v\n",
 		config_obj.GUI.Authenticator.Type, redirect)
@@ -311,6 +358,26 @@ func configureSSO(config_obj *config_proto.Config) {
 			Name: "Tenant",
 			Prompt: &survey.Input{
 				Message: "Enter the Tenant Domain name or ID?",
+			},
+		})
+
+		kingpin.FatalIfError(survey.Ask(google_oauth,
+			config_obj.GUI.Authenticator,
+			survey.WithValidator(survey.Required)), "")
+	case "OIDC":
+		// OIDC require Issuer URL
+		google_oauth = append(google_oauth, &survey.Question{
+			Name: "OidcIssuer",
+			Prompt: &survey.Input{
+				Message: "Enter valid OIDC Issuer URL",
+				Help:    "e.g. https://accounts.google.com or https://your-org-name.okta.com are valid Issuer URLs, check that URL has /.well-known/openid-configuration endpoint",
+			},
+			Validate: func(val interface{}) error {
+				// A check to avoid double slashes
+				if str, ok := val.(string); !ok || str[len(str)-1:] == "/" {
+					return fmt.Errorf("Issuer URL should not have / (slash) sign as the last symbol")
+				}
+				return nil
 			},
 		})
 
@@ -340,8 +407,11 @@ func dynDNSConfig(config_obj *config_proto.Config) error {
 }
 
 func configAutocert(config_obj *config_proto.Config) error {
-	err := survey.Ask([]*survey.Question{
-		{Name: "Hostname", Prompt: url_question},
+	err := survey.Ask([]*survey.Question{{
+		Name:     "Hostname",
+		Validate: url_validator,
+		Prompt:   url_question,
+	},
 	}, config_obj.Frontend)
 	if err != nil {
 		return err
@@ -361,28 +431,6 @@ func configAutocert(config_obj *config_proto.Config) error {
 
 	config_obj.AutocertCertCache = config_obj.Datastore.Location
 
-	return nil
-}
-
-func getMySQLConfig(config_obj *config_proto.Config) error {
-	config_obj.Datastore = &config_proto.DatastoreConfig{}
-	err := survey.Ask(data_store_mysql, config_obj.Datastore)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func getLogLocation(config_obj *config_proto.Config) error {
-	log_question.Default = path.Join(config_obj.Datastore.Location, "logs")
-	err := survey.AskOne(log_question,
-		&config_obj.Logging.OutputDirectory,
-		survey.WithValidator(survey.Required))
-	if err != nil {
-		return err
-	}
-
-	config_obj.Logging.SeparateLogsPerComponent = true
 	return nil
 }
 

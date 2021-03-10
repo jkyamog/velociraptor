@@ -32,7 +32,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path"
@@ -43,12 +42,12 @@ import (
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/pkg/errors"
 	"www.velocidex.com/golang/regparser"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/glob"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/readers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -104,6 +103,10 @@ func (self *RawRegKeyInfo) Mtime() utils.TimeVal {
 }
 
 func (self *RawRegKeyInfo) Ctime() utils.TimeVal {
+	return self.Mtime()
+}
+
+func (self *RawRegKeyInfo) Btime() utils.TimeVal {
 	return self.Mtime()
 }
 
@@ -190,85 +193,65 @@ func NewRawValueBuffer(buf string, stat *RawRegValueInfo) *RawValueBuffer {
 	}
 }
 
-type RawRegistryFileCache struct {
-	registry *regparser.Registry
-	fd       glob.ReadSeekCloser
-}
-
 type RawRegFileSystemAccessor struct {
-	mu       sync.Mutex
-	fd_cache map[string]*RawRegistryFileCache
-	scope    *vfilter.Scope
+	mu sync.Mutex
+
+	// Maintain a cache of already parsed hives
+	hive_cache map[string]*regparser.Registry
+	scope      vfilter.Scope
 }
 
 func (self *RawRegFileSystemAccessor) getRegHive(
-	file_path string) (*RawRegistryFileCache, *url.URL, error) {
-	url, err := url.Parse(file_path)
+	file_path string) (*regparser.Registry, *url.URL, error) {
+
+	// The file path is a url specifying the path to a key:
+	// Scheme is the underlying accessor
+	// Path is the path to be provided to the underlying accessor
+	// Fragment is the path within the reg hive that we need to open.
+	full_url, err := url.Parse(file_path)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	base_url := *url
+	// Cache the parsed hive under the underlying file.
+	base_url := *full_url
 	base_url.Fragment = ""
+	cache_key := base_url.String()
 
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	file_cache, pres := self.fd_cache[base_url.String()]
+	hive, pres := self.hive_cache[cache_key]
 	if !pres {
-		accessor, err := glob.GetAccessor(url.Scheme, self.scope)
+		paged_reader := readers.NewPagedReader(
+			self.scope,
+			base_url.Scheme, // Accessor
+			base_url.Path,   // Path to underlying file
+		)
+		hive, err = regparser.NewRegistry(paged_reader)
 		if err != nil {
+			paged_reader.Close()
 			return nil, nil, err
 		}
 
-		fd, err := accessor.Open(url.Path)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		reader, ok := fd.(io.ReaderAt)
-		if !ok {
-			return nil, nil, errors.New("file is not seekable")
-		}
-
-		registry, err := regparser.NewRegistry(reader)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		file_cache = &RawRegistryFileCache{
-			registry: registry,
-			fd:       fd,
-		}
-
-		self.fd_cache[url.String()] = file_cache
+		self.hive_cache[cache_key] = hive
 	}
 
-	return file_cache, url, nil
+	return hive, full_url, nil
 }
 
 const RawRegFileSystemTag = "_RawReg"
 
-func (self *RawRegFileSystemAccessor) New(scope *vfilter.Scope) (
+func (self *RawRegFileSystemAccessor) New(scope vfilter.Scope) (
 	glob.FileSystemAccessor, error) {
 
 	result_any := vql_subsystem.CacheGet(scope, RawRegFileSystemTag)
 	if result_any == nil {
 		result := &RawRegFileSystemAccessor{
-			fd_cache: make(map[string]*RawRegistryFileCache),
-			scope:    scope,
+			hive_cache: make(map[string]*regparser.Registry),
+			scope:      scope,
 		}
 		vql_subsystem.CacheSet(scope, RawRegFileSystemTag, result)
-
-		// When scope is destroyed, we close all the filehandles.
-		scope.AddDestructor(func() {
-			result.mu.Lock()
-			defer result.mu.Unlock()
-
-			for _, v := range result.fd_cache {
-				v.fd.Close()
-			}
-		})
 		return result, nil
 	}
 
@@ -277,11 +260,12 @@ func (self *RawRegFileSystemAccessor) New(scope *vfilter.Scope) (
 
 func (self *RawRegFileSystemAccessor) ReadDir(key_path string) ([]glob.FileInfo, error) {
 	var result []glob.FileInfo
-	file_cache, url, err := self.getRegHive(key_path)
+	hive, url, err := self.getRegHive(key_path)
 	if err != nil {
 		return nil, err
 	}
-	key := file_cache.registry.OpenKey(url.Fragment)
+
+	key := hive.OpenKey(url.Fragment)
 	if key == nil {
 		return nil, errors.New("Key not found")
 	}
@@ -314,7 +298,7 @@ func (self *RawRegFileSystemAccessor) ReadDir(key_path string) ([]glob.FileInfo,
 	return result, nil
 }
 
-func (self RawRegFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error) {
+func (self *RawRegFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error) {
 	return nil, errors.New("Not implemented")
 }
 
@@ -363,7 +347,7 @@ type ReadKeyValues struct{}
 
 func (self ReadKeyValues) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	globber := make(glob.Globber)
 	output_chan := make(chan vfilter.Row)
@@ -371,7 +355,7 @@ func (self ReadKeyValues) Call(
 	go func() {
 		defer close(output_chan)
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			config_obj = &config_proto.Config{}
 		}
@@ -408,7 +392,11 @@ func (self ReadKeyValues) Call(
 				continue
 			}
 			root = item_root
-			globber.Add(item_path, accessor.PathSplit)
+			err = globber.Add(item_path, accessor.PathSplit)
+			if err != nil {
+				scope.Log("glob: %v", err)
+				return
+			}
 		}
 
 		file_chan := globber.ExpandWithContext(
@@ -444,7 +432,13 @@ func (self ReadKeyValues) Call(
 							}
 						}
 					}
-					output_chan <- res
+
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- res:
+					}
 				}
 			}
 		}
@@ -453,7 +447,7 @@ func (self ReadKeyValues) Call(
 	return output_chan
 }
 
-func (self ReadKeyValues) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ReadKeyValues) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name: "read_reg_key",
 		Doc: "This is a convenience function for reading the entire " +

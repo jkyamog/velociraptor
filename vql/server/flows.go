@@ -6,13 +6,12 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/flows"
-	"www.velocidex.com/golang/velociraptor/grpc_client"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/result_sets"
+	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -26,7 +25,7 @@ type FlowsPlugin struct{}
 
 func (self FlowsPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -46,7 +45,7 @@ func (self FlowsPlugin) Call(
 			return
 		}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
@@ -66,7 +65,12 @@ func (self FlowsPlugin) Call(
 				return
 			}
 
-			output_chan <- collection_context
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- json.ConvertProtoToOrderedDict(collection_context):
+			}
+
 		}
 
 		if arg.FlowId != "" {
@@ -75,8 +79,9 @@ func (self FlowsPlugin) Call(
 			return
 		}
 
-		urn := path.Dir(flows.GetCollectionPath(arg.ClientId, "X"))
-		flow_urns, err := db.ListChildren(config_obj, urn, 0, 10000)
+		flow_path_manager := paths.NewFlowPathManager(arg.ClientId, arg.FlowId)
+		flow_urns, err := db.ListChildren(
+			config_obj, flow_path_manager.ContainerPath(), 0, 10000)
 		if err != nil {
 			scope.Log("Error: %v", err)
 			return
@@ -91,7 +96,7 @@ func (self FlowsPlugin) Call(
 	return output_chan
 }
 
-func (self FlowsPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self FlowsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "flows",
 		Doc:     "Retrieve the flows launched on each client.",
@@ -102,40 +107,44 @@ func (self FlowsPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *v
 type CancelFlowFunction struct{}
 
 func (self *CancelFlowFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	err := vql_subsystem.CheckAccess(scope, acls.COLLECT_CLIENT)
-	if err != nil {
-		scope.Log("flows: %s", err)
-		return vfilter.Null{}
-	}
-
 	arg := &FlowsPluginArgs{}
-	err = vfilter.ExtractArgs(scope, args, arg)
+	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("cancel_flow: %s", err.Error())
 		return vfilter.Null{}
 	}
 
-	config_obj, ok := artifacts.GetServerConfig(scope)
+	permissions := acls.COLLECT_CLIENT
+	if arg.ClientId == "server" {
+		permissions = acls.COLLECT_SERVER
+	}
+
+	err = vql_subsystem.CheckAccess(scope, permissions)
+	if err != nil {
+		scope.Log("cancel_flow: %v", err)
+		return vfilter.Null{}
+	}
+
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
 	}
 
 	res, err := flows.CancelFlow(ctx, config_obj,
-		arg.ClientId, arg.FlowId, "VQL query",
-		grpc_client.GRPCAPIClient{})
+		arg.ClientId, arg.FlowId, "VQL query")
 	if err != nil {
-		scope.Log("cancel_flow: %s", err.Error())
+		scope.Log("cancel_flow: %v", err.Error())
 		return vfilter.Null{}
 	}
 
-	return res
+	return json.ConvertProtoToOrderedDict(res)
 }
 
-func (self CancelFlowFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self CancelFlowFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "cancel_flow",
 		Doc:     "Cancels the flow.",
@@ -147,7 +156,7 @@ type EnumerateFlowPlugin struct{}
 
 func (self EnumerateFlowPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -167,16 +176,20 @@ func (self EnumerateFlowPlugin) Call(
 			return
 		}
 
-		config_obj, ok := artifacts.GetServerConfig(scope)
+		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
 		}
 
 		emit := func(item_type, target string) {
-			output_chan <- ordereddict.NewDict().
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- ordereddict.NewDict().
 				Set("Type", item_type).
-				Set("VFSPath", target)
+				Set("VFSPath", target):
+			}
 		}
 
 		collection_context, err := flows.LoadCollectionContext(
@@ -209,7 +222,7 @@ func (self EnumerateFlowPlugin) Call(
 		}
 
 		for _, artifact_name := range collection_context.ArtifactsWithResults {
-			result_path, err := result_sets.NewArtifactPathManager(
+			result_path, err := artifact_paths.NewArtifactPathManager(
 				config_obj, arg.ClientId, arg.FlowId, artifact_name).
 				GetPathForWriting()
 			if err != nil {
@@ -225,14 +238,13 @@ func (self EnumerateFlowPlugin) Call(
 		emit("Log", log_path)
 
 		// The flow's metadata
-		emit("CollectionContext", flows.GetCollectionPath(arg.ClientId,
-			arg.FlowId)+".db")
+		emit("CollectionContext", flow_path_manager.Path()+".db")
 	}()
 
 	return output_chan
 }
 
-func (self EnumerateFlowPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self EnumerateFlowPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "enumerate_flow",
 		Doc:     "Enumerate all the files that make up a flow.",

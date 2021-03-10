@@ -31,7 +31,7 @@ func NewFileStoreFileSystemAccessor(
 }
 
 func (self FileStoreFileSystemAccessor) New(
-	scope *vfilter.Scope) glob.FileSystemAccessor {
+	scope vfilter.Scope) glob.FileSystemAccessor {
 	return &FileStoreFileSystemAccessor{self.file_store}
 }
 
@@ -103,6 +103,10 @@ func (self *FileStoreFileInfo) Data() interface{} {
 
 func (self *FileStoreFileInfo) FullPath() string {
 	return self.FullPath_
+}
+
+func (self *FileStoreFileInfo) Btime() utils.TimeVal {
+	return utils.TimeVal{}
 }
 
 func (self *FileStoreFileInfo) Mtime() utils.TimeVal {

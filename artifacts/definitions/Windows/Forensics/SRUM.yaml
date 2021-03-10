@@ -12,9 +12,9 @@ parameters:
   - name: SRUMLocation
     default: c:\windows\system32\sru\srudb.dat
   - name: accessor
-    default: ntfs
+    default: auto
   - name: ExecutableRegex
-    default: .
+    default: .*
   - name: NetworkConnectionsGUID
     default: "{DD6636C4-8929-4683-974E-22C046A43763}"
     type: hidden

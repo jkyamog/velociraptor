@@ -89,7 +89,7 @@ func parseX509CSRFromPemStr(pem_str []byte) (*x509.CertificateRequest, error) {
 	}
 }
 
-/* GRR Client IDs are derived from the public key of the client.
+/* Velociraptor Client IDs are derived from the public key of the client.
 
 This makes it impossible to impersonate a client unless one has the
 client's corresponding private key.
@@ -153,12 +153,16 @@ func PemToPublicKey(pem_str []byte) (*rsa.PublicKey, error) {
 
 // Verify the configuration, possibly updating default settings.
 func VerifyConfig(config_obj *config_proto.Config) error {
-	if len(config_obj.Client.ServerUrls) == 0 {
+	if config_obj.Client == nil || len(config_obj.Client.ServerUrls) == 0 {
 		return errors.New("No server URLs configured!")
 	}
 
+	if config_obj.Writeback == nil {
+		config_obj.Writeback = &config_proto.Writeback{}
+	}
+
 	if config_obj.Writeback.PrivateKey == "" {
-		fmt.Println("Genering new private key....")
+		fmt.Println("Generating new private key....")
 		pem, err := GeneratePrivateKey()
 		if err != nil {
 			return errors.WithStack(err)
@@ -172,4 +176,20 @@ func VerifyConfig(config_obj *config_proto.Config) error {
 	}
 
 	return nil
+}
+
+func GetSubjectName(cert *x509.Certificate) string {
+	if cert.Subject.CommonName != "" {
+		return cert.Subject.CommonName
+	}
+
+	if len(cert.DNSNames) > 0 {
+		return cert.DNSNames[0]
+	}
+
+	if len(cert.IPAddresses) > 0 {
+		return cert.IPAddresses[0].String()
+	}
+
+	return ""
 }

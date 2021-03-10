@@ -18,6 +18,7 @@
 package responder
 
 import (
+	"context"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -31,13 +32,37 @@ import (
 	"www.velocidex.com/golang/velociraptor/logging"
 )
 
+var (
+	inc_mu     sync.Mutex
+	last_value uint64
+)
+
+// Response ID used to be incremental but now artifacts are collected
+// in parallel each collection needs to advance the response id
+// forward. We therefore remember the last id and ensure response id
+// is monotonically incremental but time based.
+func getIncValue() uint64 {
+	inc_mu.Lock()
+	defer inc_mu.Unlock()
+
+	value := uint64(time.Now().UnixNano())
+	if value <= last_value {
+		value = last_value + 1
+	}
+	last_value = value
+	return last_value
+}
+
 type Responder struct {
 	output chan *crypto_proto.GrrMessage
 
 	sync.Mutex
-	request *crypto_proto.GrrMessage
-	next_id uint64
-	logger  *logging.LogContext
+	request    *crypto_proto.GrrMessage
+	logger     *logging.LogContext
+	start_time int64
+
+	// The name of the query we are currently running.
+	Artifact string
 }
 
 // NewResponder returns a new Responder.
@@ -46,55 +71,73 @@ func NewResponder(
 	request *crypto_proto.GrrMessage,
 	output chan *crypto_proto.GrrMessage) *Responder {
 	result := &Responder{
-		request: request,
-		next_id: 0,
-		output:  output,
-		logger:  logging.GetLogger(config_obj, &logging.ClientComponent),
+		request:    request,
+		output:     output,
+		logger:     logging.GetLogger(config_obj, &logging.ClientComponent),
+		start_time: time.Now().UnixNano(),
 	}
 	return result
 }
 
-func (self *Responder) AddResponse(message *crypto_proto.GrrMessage) {
+func (self *Responder) Copy() *Responder {
+	return &Responder{
+		request:    self.request,
+		output:     self.output,
+		logger:     self.logger,
+		start_time: time.Now().UnixNano(),
+	}
+}
+
+func (self *Responder) AddResponse(
+	ctx context.Context, message *crypto_proto.GrrMessage) {
 	self.Lock()
-	defer self.Unlock()
+	output := self.output
+	self.Unlock()
 
 	message.SessionId = self.request.SessionId
 	message.Urgent = self.request.Urgent
-	message.ResponseId = self.next_id
-	self.next_id++
+	message.ResponseId = getIncValue()
 	if message.RequestId == 0 {
 		message.RequestId = self.request.RequestId
 	}
 	message.TaskId = self.request.TaskId
 
-	if self.output != nil {
-		self.output <- message
+	if output != nil {
+		select {
+		case <-ctx.Done():
+			break
+
+		case output <- message:
+		}
 	}
 }
 
-func (self *Responder) RaiseError(message string) {
-	self.AddResponse(&crypto_proto.GrrMessage{
+func (self *Responder) RaiseError(ctx context.Context, message string) {
+	self.AddResponse(ctx, &crypto_proto.GrrMessage{
 		Status: &crypto_proto.GrrStatus{
 			Backtrace:    string(debug.Stack()),
 			ErrorMessage: message,
 			Status:       crypto_proto.GrrStatus_GENERIC_ERROR,
+			Duration:     time.Now().UnixNano() - self.start_time,
 		}})
 }
 
-func (self *Responder) Return() {
-	self.AddResponse(&crypto_proto.GrrMessage{
+func (self *Responder) Return(ctx context.Context) {
+	self.AddResponse(ctx, &crypto_proto.GrrMessage{
 		Status: &crypto_proto.GrrStatus{
-			Status: crypto_proto.GrrStatus_OK,
+			Status:   crypto_proto.GrrStatus_OK,
+			Duration: time.Now().UnixNano() - self.start_time,
 		}})
 }
 
 // Send a log message to the server.
-func (self *Responder) Log(format string, v ...interface{}) {
-	self.AddResponse(&crypto_proto.GrrMessage{
+func (self *Responder) Log(ctx context.Context, format string, v ...interface{}) {
+	self.AddResponse(ctx, &crypto_proto.GrrMessage{
 		RequestId: constants.LOG_SINK,
 		LogMessage: &crypto_proto.LogMessage{
 			Message:   fmt.Sprintf(format, v...),
 			Timestamp: uint64(time.Now().UTC().UnixNano() / 1000),
+			Artifact:  self.Artifact,
 		}})
 }
 

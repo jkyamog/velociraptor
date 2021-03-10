@@ -37,7 +37,7 @@ type ModulesPlugin struct{}
 
 func (self ModulesPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &PidArgs{}
@@ -69,7 +69,11 @@ func (self ModulesPlugin) Call(
 		}
 
 		for _, mod := range modules {
-			output_chan <- mod
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- mod:
+			}
 		}
 
 	}()
@@ -77,7 +81,7 @@ func (self ModulesPlugin) Call(
 	return output_chan
 }
 
-func (self ModulesPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ModulesPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "modules",
 		Doc:     "Enumerate Loaded DLLs.",
@@ -89,7 +93,7 @@ type VADPlugin struct{}
 
 func (self VADPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &PidArgs{}
@@ -114,14 +118,18 @@ func (self VADPlugin) Call(
 		}
 
 		for _, vad := range vads {
-			output_chan <- vad
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- vad:
+			}
 		}
 	}()
 
 	return output_chan
 }
 
-func (self VADPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self VADPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "vad",
 		Doc:     "Enumerate process memory regions.",
@@ -184,7 +192,7 @@ func GetVads(pid uint32) ([]*VMemeInfo, error) {
 }
 
 func GetProcessModules(pid uint32) ([]ModuleInfo, error) {
-	handle, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE, pid)
+	handle, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE | windows.TH32CS_SNAPMODULE32, pid)
 	if err != nil {
 		return nil, errors.New(
 			fmt.Sprintf("CreateToolhelp32Snapshot for pid %v: %v ", pid, err))

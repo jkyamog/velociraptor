@@ -13,7 +13,6 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
@@ -29,7 +28,7 @@ type KillClientFunctionArgs struct {
 type KillClientFunction struct{}
 
 func (self *KillClientFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
@@ -45,7 +44,7 @@ func (self *KillClientFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	config_obj, ok := artifacts.GetServerConfig(scope)
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
@@ -69,7 +68,7 @@ func (self *KillClientFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	err = services.NotifyListener(config_obj, arg.ClientId)
+	err = services.GetNotifier().NotifyListener(config_obj, arg.ClientId)
 	if err != nil {
 		scope.Log("killkillkill: %s", err.Error())
 		return vfilter.Null{}
@@ -79,7 +78,7 @@ func (self *KillClientFunction) Call(ctx context.Context,
 }
 
 func (self KillClientFunction) Info(
-	scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "killkillkill",
 		Doc:     "Kills the client and forces a restart - this is very aggresive!",

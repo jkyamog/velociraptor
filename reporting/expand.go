@@ -14,14 +14,15 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/olekukonko/tablewriter"
-	"www.velocidex.com/golang/velociraptor/artifacts"
+	"www.velocidex.com/golang/velociraptor/actions"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
 func EvalQueryToTable(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	vql *vfilter.VQL,
 	out io.Writer) *tablewriter.Table {
 
@@ -59,7 +60,7 @@ func EvalQueryToTable(ctx context.Context,
 type Expansions struct {
 	config_obj *config_proto.Config
 	rows       []vfilter.Row
-	scope      *vfilter.Scope
+	scope      vfilter.Scope
 }
 
 // Support a number of expansions in description strings.
@@ -86,7 +87,6 @@ func FormatDescription(
 
 	err = tmpl.Execute(buffer, expansion)
 	if err != nil {
-		utils.Debug(err)
 		return description
 	}
 
@@ -94,12 +94,17 @@ func FormatDescription(
 }
 
 func (self *Expansions) DocFrom(artifact string) string {
-	repository, err := artifacts.GetGlobalRepository(self.config_obj)
+	manager, err := services.GetRepositoryManager()
 	if err != nil {
 		return ""
 	}
 
-	artifact_definition, pres := repository.Get(artifact)
+	repository, err := manager.GetGlobalRepository(self.config_obj)
+	if err != nil {
+		return ""
+	}
+
+	artifact_definition, pres := repository.Get(self.config_obj, artifact)
 	if !pres {
 		return ""
 	}
@@ -115,9 +120,10 @@ func (self *Expansions) Query(queries ...string) string {
 
 	defer scope.Close()
 
-	scope.Logger = log.New(os.Stderr, " ", 0)
+	scope.SetLogger(log.New(os.Stderr, " ", 0))
 
 	for _, query := range queries {
+		query_log := actions.QueryLog.AddQuery(query)
 		vql, err := vfilter.Parse(query)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
@@ -127,6 +133,7 @@ func (self *Expansions) Query(queries ...string) string {
 
 		table := EvalQueryToTable(ctx, scope, vql, result)
 		table.Render()
+		query_log.Close()
 	}
 
 	return result.String()

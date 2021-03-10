@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"regexp"
+	"strings"
 
 	"github.com/Velocidex/yaml/v2"
 	"github.com/alexmullins/zip"
@@ -173,10 +174,12 @@ func ExportNotebookToZip(
 
 	for _, metadata := range notebook.CellMetadata {
 		if metadata.CellId != "" {
-			db.GetSubject(config_obj,
+			err = db.GetSubject(config_obj,
 				notebook_path_manager.Cell(metadata.CellId).Path(),
 				metadata)
-
+			if err != nil {
+				return err
+			}
 			metadata.Data = ""
 		}
 	}
@@ -185,7 +188,6 @@ func ExportNotebookToZip(
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(serialized))
 
 	file_store_factory := file_store.GetFileStore(config_obj)
 	fd, err := file_store_factory.WriteFile(notebook_path_manager.ZipExport())
@@ -216,8 +218,12 @@ func ExportNotebookToZip(
 		}
 
 		for _, child := range children {
-			out_fd, err := zip_writer.Create(
-				exported_path_manager.CellItem(cell_id, child.Name()))
+			out_filename := exported_path_manager.CellItem(
+				cell_id, child.Name())
+
+			// In Zip files, members should have no leading /
+			out_filename = strings.TrimPrefix(out_filename, "/")
+			out_fd, err := zip_writer.Create(out_filename)
 			if err != nil {
 				continue
 			}
@@ -229,10 +235,8 @@ func ExportNotebookToZip(
 			}
 			defer fd.Close()
 
-			utils.Copy(ctx, out_fd, fd)
+			_, _ = utils.Copy(ctx, out_fd, fd)
 		}
-
-		return
 	}
 
 	for _, cell := range notebook.CellMetadata {
@@ -244,9 +248,8 @@ func ExportNotebookToZip(
 		fd.Close()
 		return err
 	}
-	f.Write(serialized)
-
-	return nil
+	_, err = f.Write(serialized)
+	return err
 }
 
 func ExportNotebookToHTML(
@@ -267,8 +270,15 @@ func ExportNotebookToHTML(
 		return err
 	}
 
-	output.Write([]byte(fmt.Sprintf(HtmlPreable, notebook.Name)))
-	defer output.Write([]byte(HtmlPostscript))
+	_, err = output.Write([]byte(fmt.Sprintf(HtmlPreable, notebook.Name)))
+	if err != nil {
+		return err
+	}
+
+	// Write the postscript when we are done.
+	defer func() {
+		_, _ = output.Write([]byte(HtmlPostscript))
+	}()
 
 	cell := &api_proto.NotebookCell{}
 	for _, cell_md := range notebook.CellMetadata {
@@ -279,7 +289,10 @@ func ExportNotebookToHTML(
 			return err
 		}
 
-		output.Write([]byte("<div class=\"notebook-cell\">\n"))
+		_, err = output.Write([]byte("<div class=\"notebook-cell\">\n"))
+		if err != nil {
+			return err
+		}
 
 		// Expand tables
 		cell_output := csvViewerRegexp.ReplaceAllStringFunc(
@@ -294,7 +307,11 @@ func ExportNotebookToHTML(
 			})
 
 		_, err := output.Write([]byte(cell_output))
-		output.Write([]byte("</div>\n"))
+		if err != nil {
+			return err
+		}
+
+		_, err = output.Write([]byte("</div>\n"))
 		if err != nil {
 			return err
 		}

@@ -29,9 +29,9 @@ import (
 	"github.com/sirupsen/logrus"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -72,10 +72,21 @@ func streamQuery(
 	response_channel := make(chan *actions_proto.VQLResponse)
 	scope_logger := MakeLogger(response_channel)
 
-	builder := artifacts.ScopeBuilder{
+	// Add extra artifacts to the query from the global repository.
+	manager, err := services.GetRepositoryManager()
+	if err != nil {
+		return err
+	}
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return err
+	}
+
+	builder := services.ScopeBuilder{
 		Config:     config_obj,
 		ACLManager: vql_subsystem.NewServerACLManager(config_obj, peer_name),
 		Logger:     scope_logger,
+		Repository: repository,
 		Env:        ordereddict.NewDict(),
 	}
 
@@ -83,21 +94,15 @@ func streamQuery(
 		builder.Env.Set(env_spec.Key, env_spec.Value)
 	}
 
-	repository, err := artifacts.GetGlobalRepository(config_obj)
-	if err != nil {
-		return err
-	}
+	// Now execute the query.
+	scope := manager.BuildScope(builder)
 
-	err = repository.PopulateArtifactsVQLCollectorArgs(arg)
-	if err != nil {
-		return err
-	}
-
-	scope := builder.Build()
-	defer scope.Close()
+	// Throttle the query if required.
+	vfilter.InstallThrottler(scope, vfilter.NewTimeThrottler(float64(rate)))
 
 	go func() {
 		defer close(response_channel)
+		defer scope.Close()
 
 		scope.Log("Starting query execution.")
 
@@ -113,7 +118,7 @@ func streamQuery(
 			// All the queries will use the same scope. This allows one
 			// query to define functions for the next query in order.
 			for query_idx, vql := range statements {
-				fmt.Printf("Running %v\n", vql.ToString(scope))
+				logger.Info("Query: Running %v\n", vql.ToString(scope))
 
 				result_chan := vfilter.GetResponseChannel(
 					vql, stream.Context(), scope,

@@ -1,4 +1,8 @@
-SELECT String.Offset, str(str=String.Data) AS Hit
+SELECT mock(plugin='info', results=[dict(OS='windows'), dict(OS='windows')] ) FROM scope()[
+ {
+  "mock(plugin='info', results= [dict(OS='windows'), dict(OS='windows')])": null
+ }
+]SELECT String.Offset, str(str=String.Data) AS Hit
 FROM yara(rules=hiveSig, blocksize=10,
 files="regfXXXXXXXXXXXXXXXXXXXXXXprogram", accessor="data")
 []SELECT String.Offset, str(str=String.Data) AS Hit
@@ -89,6 +93,14 @@ files=srcDir+"/artifacts/testdata/files/yara_test.txt")
   "String.Offset": 12,
   "Hit": "gfXXXXXXXXprogram\n"
  }
+]SELECT "imphash", basename(path=FileName)
+FROM yara(rules=imphashSig, accessor="file",
+files=srcDir+"/artifacts/testdata/files/3DBuilder.ResourceResolver.exe")
+[
+ {
+  "\"imphash\"": "imphash",
+  "basename(path=FileName)": "3DBuilder.ResourceResolver.exe"
+ }
 ]LET _ <= SELECT
       mock(plugin='http_client', results=[
          dict(Url='http://remote',
@@ -146,7 +158,7 @@ FROM scope()
    "Name1",
    "Name2"
   ],
-  "IOCdata": "[]vfilter.Any{\"Foobar\", \"Other Hit\"} [Foobar Other Hit]",
+  "IOCdata": "[]types.Any{\"Foobar\", \"Other Hit\"} [Foobar Other Hit]",
   "_Source": "Windows.Detection.RemoteYara.Process"
  }
 ]SELECT mock_check(plugin='proc_dump', expected_calls=0), mock_check(function='upload', expected_calls=0), mock_check(plugin="proc_yara", expected_calls=1) FROM scope()[
@@ -177,7 +189,7 @@ FROM scope()
    "Name1",
    "Name2"
   ],
-  "IOCdata": "[]vfilter.Any{\"Foobar\", \"Other Hit\"} [Foobar Other Hit]",
+  "IOCdata": "[]types.Any{\"Foobar\", \"Other Hit\"} [Foobar Other Hit]",
   "_Source": "Windows.Detection.RemoteYara.Process"
  }
 ]SELECT mock_check(plugin='proc_dump', expected_calls=0), mock_check(function='upload', expected_calls=0), mock_check(plugin="proc_yara", expected_calls=1) FROM scope()[
@@ -192,7 +204,7 @@ FROM scope()
    "Error": "OK"
   }
  }
-]SELECT * FROM Artifact.Windows.Detection.RemoteYara.Process( pidRegex='1236',  collectProcess="Y", yaraURL='http://remote')[
+]SELECT * FROM Artifact.Windows.Detection.RemoteYara.Process( pidRegex='1236',  collectProcess="Y", source="", yaraURL='http://remote')[
  {
   "ProcessName": "mimikatz.exe",
   "CommandLine": "mimikatz",
@@ -208,7 +220,7 @@ FROM scope()
    "Name1",
    "Name2"
   ],
-  "IOCdata": "[]vfilter.Any{\"Foobar\", \"Other Hit\"} [Foobar Other Hit]",
+  "IOCdata": "[]types.Any{\"Foobar\", \"Other Hit\"} [Foobar Other Hit]",
   "_Source": "Windows.Detection.RemoteYara.Process"
  },
  {

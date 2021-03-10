@@ -42,8 +42,8 @@ sources:
             WHERE Name = "\\\\.\\" + RootDevice
 
       # Generate the collection globs for each device
-      - LET specs = SELECT Device + Glob AS Glob FROM parse_csv(
-            filename=collectionSpec, accessor="data")
+      - LET specs = SELECT Device + Glob AS Glob
+            FROM collectionSpec
             WHERE log(message="Processing Device " + Device + " With " + Accessor)
 
       # Join all the collection rules into a single Glob plugin. This ensure we
@@ -56,14 +56,14 @@ sources:
                Device, strip(string=FullPath, prefix=Device) AS Path,
                Data.mft AS MFT, Data.name_type AS NameType
         FROM glob(globs=specs.Glob, accessor=Accessor)
-        WHERE NOT IsDir
+        WHERE Mode.IsRegular
 
       # Get all volume shadows on this system.
       - LET volume_shadows = SELECT Data.InstallDate AS InstallDate,
                Data.DeviceObject + "\\" AS Device
         FROM glob(globs='/*', accessor=Accessor)
         WHERE Device =~ 'VolumeShadowCopy' AND
-              Data.OriginatingMachine = originating_machine.System[0] AND
+              Data.OriginatingMachine =~ originating_machine.System[0] AND
               InstallDate =~ VSSDateRegex
 
       # The target devices are the root device and all the VSS
@@ -90,12 +90,16 @@ sources:
       - LET unique_mtimes = SELECT * FROM all_results GROUP BY Key
 
       # Upload the files using the MFT accessor.
-      - LET uploaded_tiles = SELECT Created, LastAccessed, Modified, MFT, SourceFile, Size,
+      - LET uploaded_files = SELECT * FROM foreach(row=unique_mtimes,
+        workers=30,
+        query={
+            SELECT Created, LastAccessed, Modified, MFT, SourceFile, Size,
                upload(file=Device+MFT, name=SourceFile, accessor="mft") AS Upload
-        FROM unique_mtimes
+            FROM scope()
+        })
 
       # Seperate the hashes into their own column.
       - SELECT now() AS CopiedOnTimestamp, SourceFile, Upload.Path AS DestinationFile,
                Size AS FileSize, Upload.sha256 AS SourceFileSha256,
                Created, Modified, LastAccessed, MFT
-        FROM uploaded_tiles
+        FROM uploaded_files

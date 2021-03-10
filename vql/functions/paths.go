@@ -34,7 +34,7 @@ type DirnameArgs struct {
 type DirnameFunction struct{}
 
 func (self *DirnameFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &DirnameArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -51,7 +51,7 @@ func (self *DirnameFunction) Call(ctx context.Context,
 	return vfilter.Null{}
 }
 
-func (self DirnameFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self DirnameFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "dirname",
 		Doc:     "Return the directory path.",
@@ -62,7 +62,7 @@ func (self DirnameFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap
 type BasenameFunction struct{}
 
 func (self *BasenameFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &DirnameArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -79,7 +79,7 @@ func (self *BasenameFunction) Call(ctx context.Context,
 	return vfilter.Null{}
 }
 
-func (self BasenameFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self BasenameFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "basename",
 		Doc:     "Return the basename of the path.",
@@ -94,7 +94,7 @@ type PathJoinArgs struct {
 type PathJoinFunction struct{}
 
 func (self *PathJoinFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &PathJoinArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -117,7 +117,7 @@ func (self *PathJoinFunction) Call(ctx context.Context,
 	return result
 }
 
-func (self PathJoinFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self PathJoinFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "path_join",
 		Doc:     "Build a path by joining all components.",
@@ -125,8 +125,36 @@ func (self PathJoinFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMa
 	}
 }
 
+type PathSplitArgs struct {
+	Path string `vfilter:"required,field=path,doc=Path to split into components."`
+}
+
+type PathSplitFunction struct{}
+
+func (self *PathSplitFunction) Call(ctx context.Context,
+	scope vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+	arg := &PathSplitArgs{}
+	err := vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("path_split: %s", err.Error())
+		return []string{}
+	}
+
+	return utils.SplitComponents(arg.Path)
+}
+
+func (self PathSplitFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "path_split",
+		Doc:     "Split a path into components. Note this is more complex than just split() because it takes into account path escaping.",
+		ArgType: type_map.AddType(scope, &PathSplitArgs{}),
+	}
+}
+
 func init() {
 	vql_subsystem.RegisterFunction(&DirnameFunction{})
 	vql_subsystem.RegisterFunction(&BasenameFunction{})
 	vql_subsystem.RegisterFunction(&PathJoinFunction{})
+	vql_subsystem.RegisterFunction(&PathSplitFunction{})
 }

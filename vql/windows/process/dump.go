@@ -44,7 +44,7 @@ type ProcDumpPlugin struct{}
 
 func (self ProcDumpPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &PidArgs{}
@@ -82,9 +82,14 @@ func (self ProcDumpPlugin) Call(
 		// Use a dmp extension to make it easier to open.
 		filename += ".dmp"
 
-		scope.AddDestructor(func() {
+		err = scope.AddDestructor(func() {
 			os.Remove(filename)
 		})
+		if err != nil {
+			os.Remove(filename)
+			scope.Log("proc_dump: %v", err)
+			return
+		}
 
 		c_filename := C.CString(filename)
 		defer C.free(unsafe.Pointer(c_filename))
@@ -95,15 +100,20 @@ func (self ProcDumpPlugin) Call(
 			return
 		}
 
-		output_chan <- ordereddict.NewDict().
+		select {
+		case <-ctx.Done():
+			return
+
+		case output_chan <- ordereddict.NewDict().
 			Set("FullPath", filename).
-			Set("Pid", arg.Pid)
+			Set("Pid", arg.Pid):
+		}
 	}()
 
 	return output_chan
 }
 
-func (self ProcDumpPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self ProcDumpPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "proc_dump",
 		Doc:     "Dumps process memory.",

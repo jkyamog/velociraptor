@@ -38,7 +38,7 @@ type _ParseEvtxPlugin struct{}
 
 func (self _ParseEvtxPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -105,12 +105,22 @@ func (self _ParseEvtxPlugin) Call(
 						}
 
 						if database != nil {
-							output_chan <- database.Enrich(
-								event.(*ordereddict.Dict))
+							select {
+							case <-ctx.Done():
+								return
+
+							case output_chan <- database.Enrich(
+								event.(*ordereddict.Dict)):
+							}
 
 						} else {
-							output_chan <- maybeEnrichEvent(
-								event.(*ordereddict.Dict))
+							select {
+							case <-ctx.Done():
+								return
+
+							case output_chan <- maybeEnrichEvent(
+								event.(*ordereddict.Dict)):
+							}
 						}
 					}
 				}
@@ -122,7 +132,7 @@ func (self _ParseEvtxPlugin) Call(
 	return output_chan
 }
 
-func (self _ParseEvtxPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _ParseEvtxPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "parse_evtx",
 		Doc:     "Parses events from an EVTX file.",
@@ -134,7 +144,7 @@ type _WatchEvtxPlugin struct{}
 
 func (self _WatchEvtxPlugin) Call(
 	ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
@@ -174,13 +184,12 @@ func (self _WatchEvtxPlugin) Call(
 		}
 
 		// Wait until the query is complete.
-		for {
+		for event := range event_channel {
 			select {
 			case <-ctx.Done():
 				return
 
-			case event := <-event_channel:
-				output_chan <- event
+			case output_chan <- event:
 			}
 		}
 	}()
@@ -188,7 +197,7 @@ func (self _WatchEvtxPlugin) Call(
 	return output_chan
 }
 
-func (self _WatchEvtxPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self _WatchEvtxPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:    "watch_evtx",
 		Doc:     "Watch an EVTX file and stream events from it. ",

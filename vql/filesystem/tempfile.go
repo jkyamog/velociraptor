@@ -25,9 +25,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/tink-ab/tempfile"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/constants"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -42,7 +40,7 @@ type _TempfileRequest struct {
 type TempfileFunction struct{}
 
 func (self *TempfileFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_WRITE)
@@ -72,14 +70,14 @@ func (self *TempfileFunction) Call(ctx context.Context,
 		permissions = 0400
 	}
 
-	tmpfile, err := tempfile.TempFile("", "tmp", arg.Extension)
+	tmpfile, err := ioutil.TempFile("", "tmp*"+arg.Extension)
 	if err != nil {
 		scope.Log("tempfile: %v", err)
 		return false
 	}
 
-	// Set the permissions to the desired level.
-	os.Chmod(tmpfile.Name(), permissions)
+	// Try to set the permissions to the desired level.
+	_ = os.Chmod(tmpfile.Name(), permissions)
 
 	for _, content := range arg.Data {
 		_, err := tmpfile.Write([]byte(content))
@@ -110,21 +108,23 @@ func (self *TempfileFunction) Call(ctx context.Context,
 	}
 
 	if arg.RemoveLast {
-		root_any, pres := scope.Resolve(constants.SCOPE_ROOT)
-		if pres {
-			root, ok := root_any.(*vfilter.Scope)
-			if ok {
-				scope.Log("Adding global destructor for %v", tmpfile.Name())
-				root.AddDestructor(removal)
-			}
+		scope.Log("Adding global destructor for %v", tmpfile.Name())
+		err := vql_subsystem.GetRootScope(scope).AddDestructor(removal)
+		if err != nil {
+			removal()
+			scope.Log("tempfile: %v", err)
 		}
 	} else {
-		scope.AddDestructor(removal)
+		err := scope.AddDestructor(removal)
+		if err != nil {
+			removal()
+			scope.Log("tempfile: %v", err)
+		}
 	}
 	return tmpfile.Name()
 }
 
-func (self TempfileFunction) Info(scope *vfilter.Scope,
+func (self TempfileFunction) Info(scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "tempfile",
@@ -140,7 +140,7 @@ type _TempdirRequest struct {
 type TempdirFunction struct{}
 
 func (self *TempdirFunction) Call(ctx context.Context,
-	scope *vfilter.Scope,
+	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
 	err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_WRITE)
@@ -149,7 +149,7 @@ func (self *TempdirFunction) Call(ctx context.Context,
 		return false
 	}
 
-	arg := &_TempfileRequest{}
+	arg := &_TempdirRequest{}
 	err = vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("tempdir: %s", err.Error())
@@ -179,26 +179,30 @@ func (self *TempdirFunction) Call(ctx context.Context,
 	}
 
 	if arg.RemoveLast {
-		root_any, pres := scope.Resolve(constants.SCOPE_ROOT)
-		if pres {
-			root, ok := root_any.(*vfilter.Scope)
-			if ok {
-				scope.Log("Adding global destructor for %v", dir)
-				root.AddDestructor(removal)
-			}
+		scope.Log("Adding global destructor for %v", dir)
+		err := vql_subsystem.GetRootScope(scope).AddDestructor(removal)
+		if err != nil {
+			removal()
+			scope.Log("tempfile: %v", err)
 		}
+
 	} else {
-		scope.AddDestructor(removal)
+		err := scope.AddDestructor(removal)
+		if err != nil {
+			removal()
+			scope.Log("tempfile: %v", err)
+		}
+
 	}
 	return dir
 }
 
-func (self TempdirFunction) Info(scope *vfilter.Scope,
+func (self TempdirFunction) Info(scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "tempdir",
 		Doc:     "Create a temporary directory. The directory will be removed when the query ends.",
-		ArgType: type_map.AddType(scope, &_TempfileRequest{}),
+		ArgType: type_map.AddType(scope, &_TempdirRequest{}),
 	}
 }
 

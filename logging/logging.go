@@ -18,26 +18,27 @@
 package logging
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"sync"
 	"time"
 
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
+	"github.com/mattn/go-isatty"
 	"github.com/pkg/errors"
 	"github.com/rifflock/lfshook"
 	"github.com/sirupsen/logrus"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/json"
 )
 
 var (
 	SuppressLogging = false
+	NoColor         = false
 
 	GenericComponent  = "Velociraptor"
 	FrontendComponent = "VelociraptorFrontend"
@@ -51,8 +52,12 @@ var (
 
 	Manager *LogManager
 
-	mu      sync.Mutex
-	prelogs []string
+	mu          sync.Mutex
+	prelogs     []string
+	memory_logs []string
+
+	tag_regex         = regexp.MustCompile("<([^>/0]+)>")
+	closing_tag_regex = regexp.MustCompile("</>")
 )
 
 func InitLogging(config_obj *config_proto.Config) error {
@@ -76,6 +81,13 @@ func InitLogging(config_obj *config_proto.Config) error {
 	return nil
 }
 
+func GetMemoryLogs() []string {
+	mu.Lock()
+	defer mu.Unlock()
+
+	return append([]string{}, memory_logs...)
+}
+
 // Early in the startup process, we find that we need to log sometimes
 // but we have no idea where to send the logs and what components to
 // load (because the config is not fully loaded yet). We therefore
@@ -83,6 +95,11 @@ func InitLogging(config_obj *config_proto.Config) error {
 func Prelog(format string, v ...interface{}) {
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Truncate too many logs
+	if len(prelogs) > 1000 {
+		prelogs = nil
+	}
 
 	prelogs = append(prelogs, fmt.Sprintf(format, v...))
 }
@@ -92,6 +109,7 @@ func FlushPrelogs(config_obj *config_proto.Config) {
 	for _, msg := range prelogs {
 		logger.Info(msg)
 	}
+	prelogs = make([]string, 0)
 }
 
 type LogContext struct {
@@ -99,19 +117,27 @@ type LogContext struct {
 }
 
 func (self *LogContext) Debug(format string, v ...interface{}) {
-	self.Logger.Debug(fmt.Sprintf(format, v...))
+	if self.Logger != nil {
+		self.Logger.Debug(fmt.Sprintf(format, v...))
+	}
 }
 
 func (self *LogContext) Info(format string, v ...interface{}) {
-	self.Logger.Info(fmt.Sprintf(format, v...))
+	if self.Logger != nil {
+		self.Logger.Info(fmt.Sprintf(format, v...))
+	}
 }
 
 func (self *LogContext) Warn(format string, v ...interface{}) {
-	self.Logger.Warn(fmt.Sprintf(format, v...))
+	if self.Logger != nil {
+		self.Logger.Warn(fmt.Sprintf(format, v...))
+	}
 }
 
-func (self *LogContext) Err(format string, v ...interface{}) {
-	self.Logger.Error(fmt.Sprintf(format, v...))
+func (self *LogContext) Error(format string, v ...interface{}) {
+	if self.Logger != nil {
+		self.Logger.Error(fmt.Sprintf(format, v...))
+	}
 }
 
 type LogManager struct {
@@ -123,10 +149,15 @@ type LogManager struct {
 func (self *LogManager) GetLogger(
 	config_obj *config_proto.Config,
 	component *string) *LogContext {
+	if config_obj == nil {
+		return nil
+	}
+
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	if config_obj != nil && config_obj.Logging != nil &&
+	if config_obj != nil &&
+		config_obj.Logging != nil &&
 		!config_obj.Logging.SeparateLogsPerComponent {
 		component = &GenericComponent
 	}
@@ -153,14 +184,26 @@ func Reset() {
 
 func getRotator(
 	config_obj *config_proto.Config,
-	base_path string) *rotatelogs.RotateLogs {
+	rotator_config *config_proto.LoggingRetentionConfig,
+	base_path string) io.Writer {
 
-	max_age := config_obj.Logging.MaxAge
+	if rotator_config == nil {
+		rotator_config = &config_proto.LoggingRetentionConfig{
+			RotationTime: config_obj.Logging.RotationTime,
+			MaxAge:       config_obj.Logging.MaxAge,
+		}
+	}
+
+	if rotator_config.Disabled {
+		return ioutil.Discard
+	}
+
+	max_age := rotator_config.MaxAge
 	if max_age == 0 {
 		max_age = 86400 * 365 // 1 year.
 	}
 
-	rotation := config_obj.Logging.RotationTime
+	rotation := rotator_config.RotationTime
 	if rotation == 0 {
 		rotation = 604800 // 7 days
 	}
@@ -186,7 +229,7 @@ func (self *LogManager) makeNewComponent(
 	component *string) (*LogContext, error) {
 
 	Log := logrus.New()
-	Log.Out = ioutil.Discard
+	Log.Out = inMemoryLogWriter{}
 	Log.Level = logrus.DebugLevel
 
 	if config_obj != nil && config_obj.Logging != nil &&
@@ -201,19 +244,21 @@ func (self *LogManager) makeNewComponent(
 
 		pathMap := lfshook.WriterMap{
 			logrus.DebugLevel: getRotator(
-				config_obj,
+				config_obj, config_obj.Logging.Debug,
 				base_filename+"_debug.log"),
 			logrus.InfoLevel: getRotator(
-				config_obj,
+				config_obj, config_obj.Logging.Info,
 				base_filename+"_info.log"),
 			logrus.ErrorLevel: getRotator(
-				config_obj,
+				config_obj, config_obj.Logging.Error,
 				base_filename+"_error.log"),
 		}
 
 		hook := lfshook.NewHook(
 			pathMap,
-			&logrus.JSONFormatter{},
+			&logrus.JSONFormatter{
+				DisableHTMLEscape: true,
+			},
 		)
 		Log.Hooks.Add(hook)
 	}
@@ -230,26 +275,36 @@ func (self *LogManager) makeNewComponent(
 		stderr_map[logrus.ErrorLevel] = os.Stderr
 	}
 
-	Log.Hooks.Add(lfshook.NewHook(stderr_map, &Formatter{}))
+	Log.Hooks.Add(lfshook.NewHook(stderr_map, &Formatter{stderr_map}))
+	if !NoColor && !isatty.IsTerminal(os.Stdout.Fd()) {
+		NoColor = true
+	}
 
 	return &LogContext{Log}, nil
 }
 
-type Formatter struct{}
-
-func (self *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
-	b := &bytes.Buffer{}
-
-	levelText := strings.ToUpper(entry.Level.String())
-	fmt.Fprintf(b, "[%s] %v %s ", levelText, entry.Time.Format(time.RFC3339),
-		strings.TrimRight(entry.Message, "\r\n"))
-
-	if len(entry.Data) > 0 {
-		serialized, _ := json.Marshal(entry.Data)
-		fmt.Fprintf(b, "%s", serialized)
+func AddLogFile(filename string) error {
+	fd, err := os.OpenFile(filename,
+		os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
 	}
 
-	return append(b.Bytes(), '\n'), nil
+	writer_map := lfshook.WriterMap{
+		logrus.ErrorLevel: fd,
+		logrus.DebugLevel: fd,
+		logrus.InfoLevel:  fd,
+		logrus.WarnLevel:  fd,
+	}
+
+	for _, log := range Manager.contexts {
+		log.Hooks.Add(lfshook.NewHook(
+			writer_map, &logrus.JSONFormatter{
+				DisableHTMLEscape: true,
+			},
+		))
+	}
+	return nil
 }
 
 type logWriter struct {
@@ -294,4 +349,26 @@ func GetStackTrace(err error) string {
 		}
 	}
 	return ""
+}
+
+// Clear tags from log messages.
+func clearTag(message string) string {
+	message = tag_regex.ReplaceAllString(message, "")
+	return closing_tag_regex.ReplaceAllString(message, "")
+}
+
+type inMemoryLogWriter struct{}
+
+func (self inMemoryLogWriter) Write(p []byte) (n int, err error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Truncate too many logs
+	if len(memory_logs) > 1000 {
+		prelogs = nil
+	}
+
+	memory_logs = append(memory_logs, string(p))
+
+	return len(p), nil
 }

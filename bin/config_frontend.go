@@ -21,9 +21,11 @@ func doConfigFrontend() {
 	config_obj, err := DefaultConfigLoader.WithRequiredFrontend().LoadAndValidate()
 	kingpin.FatalIfError(err, "Unable to load config.")
 
-	if config_obj.Datastore.Implementation == "FileBaseDataStore" {
-		kingpin.Fatalf("Current FileStore implementation is %v which does not support multiple frontends.", config_obj.Datastore.Implementation)
-	}
+	/*
+		if config_obj.Datastore.Implementation == "FileBaseDataStore" {
+			kingpin.Fatalf("Current FileStore implementation is %v which does not support multiple frontends.", config_obj.Datastore.Implementation)
+		}
+	*/
 
 	frontend_config := &config_proto.FrontendConfig{}
 	proto.Merge(frontend_config, config_obj.Frontend)
@@ -42,7 +44,8 @@ func doConfigFrontend() {
 			survey.WithValidator(survey.Required)), "")
 	}
 
-	if config_obj.Frontend.DynDns.DdnsUsername != "" {
+	if config_obj.Frontend.DynDns != nil &&
+		config_obj.Frontend.DynDns.DdnsUsername != "" {
 		kingpin.FatalIfError(dynDNSConfig(config_obj), "")
 	}
 
